@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source srcset="mascot_monogram_dark.png" media="(prefers-color-scheme: dark)">
-    <img src="mascot_monogram.png" alt="FuzzyShell Mascot" width="96" height="96">
+    <img src="mascot_monogram_light.png" alt="FuzzyShell Mascot" width="96" height="96">
   </picture>
 </p>
 # FuzzyShell 
