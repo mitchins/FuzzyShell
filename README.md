@@ -1,4 +1,4 @@
-# FuzzyShell 🔍 ![FuzzyShell Mascot](mascot.png)
+# FuzzyShell 🔍 ![FuzzyShell Mascot](mascot_transparent.png){:height="50px"}
 
 Lightning-fast semantic search for your command history. Find that command you ran last week with just a few keystrokes.
 
