@@ -1,24 +1,16 @@
-<div align="center">
+<p align="center">
+  <span style="font-size:3em; font-weight:bold;">FuzzyShell</span>
+</p>
 
-<table border="0" cellpadding="0" cellspacing="0" style="border:none; margin-left:auto; margin-right:auto;">
-  <tr>
-    <td style="vertical-align: middle; padding-right: 36px; border:none;">
-      <picture>
-        <source srcset="mascot_dark.png" media="(prefers-color-scheme: dark)">
-        <img src="mascot_light.png" alt="FuzzyShell Mascot" width="110" height="110">
-      </picture>
-    </td>
-    <td style="vertical-align: middle; border:none;">
-      <h1 style="font-size:3em; font-weight:bold; margin:0 0 0.18em 0; line-height:1.08;">FuzzyShell</h1>
-      <hr style="margin:0 0 1em 0;">
-      <div style="font-size:1.24em; color:var(--fgColor-muted,#6e7781); font-weight:normal;">
-        Lightning-fast semantic search for your command history.<br>
-        Find that command you ran last week with just a few keystrokes.
-      </div>
-    </td>
-  </tr>
-</table>
-
+<div style="display: flex; justify-content: center; align-items: center; gap: 24px; margin-bottom: 32px;">
+  <picture>
+    <source srcset="mascot_dark.png" media="(prefers-color-scheme: dark)">
+    <img src="mascot_light.png" alt="FuzzyShell Mascot" width="90" height="90">
+  </picture>
+  <span style="font-size:1.24em; color:var(--fgColor-muted,#6e7781);">
+    Lightning-fast semantic search for your command history.<br>
+    Find that command you ran last week with just a few keystrokes.
+  </span>
 </div>
 
 
