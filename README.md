@@ -1,11 +1,11 @@
-<div style="display: flex; align-items: center; gap: 24px; margin-bottom: 24px;">
+<div style="display: flex; align-items: center; gap: 24px; margin-bottom: 32px;">
   <picture>
     <source srcset="mascot_monogram_dark_pure_white.png" media="(prefers-color-scheme: dark)">
-    <img src="mascot_monogram_light_pure_black.png" alt="FuzzyShell Mascot" width="88" height="88" style="display: block;">
+    <img src="mascot_monogram_light_pure_black.png" alt="FuzzyShell Mascot" width="96" height="96" style="display: block;">
   </picture>
   <div>
-    <div style="font-size:2.6em; font-weight:bold; line-height:1.1; margin-bottom:0.15em">FuzzyShell</div>
-    <div style="font-size:1.3em; color:var(--fgColor-muted, #6e7781);">
+    <div style="font-size:2.4em; font-weight:bold; line-height:1.05; margin-bottom:0.08em">FuzzyShell</div>
+    <div style="font-size:1.22em; color:var(--fgColor-muted,#6e7781);">
       Lightning-fast semantic search for your command history.<br>
       Find that command you ran last week with just a few keystrokes.
     </div>
