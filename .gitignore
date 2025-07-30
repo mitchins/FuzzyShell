@@ -11,3 +11,5 @@ fuzzyshell.db
 venv/
 build/
 .pytest_cache/
+mascot_small.png
+.DS_Store

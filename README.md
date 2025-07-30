@@ -1,4 +1,6 @@
-# FuzzyShell 🔍 ![FuzzyShell Mascot](mascot_transparent.png){:height="50px"}
+![FuzzyShell Mascot](mascot_monogram.png#gh-light-mode-only){:height="50px"}
+![FuzzyShell Mascot](mascot_monogram_dark.png#gh-dark-mode-only){:height="50px"}
+# FuzzyShell 
 
 Lightning-fast semantic search for your command history. Find that command you ran last week with just a few keystrokes.
 
