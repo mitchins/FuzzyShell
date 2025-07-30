@@ -86,6 +86,55 @@ class StatusBar(Static):
         
         return full_text
 
+class StatusFooter(Static):
+    """Combined footer showing status info and keybindings."""
+    
+    version = reactive(__version__)
+    item_count = reactive(0)
+    embedding_model = reactive("unknown")
+    search_time = reactive(0.0)
+    
+    def render(self):
+        """Render the combined status footer."""
+        # Left side: Version and stats
+        left_text = Text()
+        left_text.append(f"FuzzyShell v{self.version}", style="bold cyan")
+        
+        if self.item_count > 0:
+            left_text.append(f" • {self.item_count:,} items", style="dim")
+            if self.embedding_model != "unknown":
+                # Shorten model name for display
+                model_short = self.embedding_model.replace("all-MiniLM-L6-v2", "MiniLM-L6")
+                left_text.append(f" ({model_short})", style="dim blue")
+        
+        if self.search_time > 0:
+            left_text.append(f" • {self.search_time*1000:.0f}ms", style="dim green")
+        
+        # Right side: Key bindings (simplified)
+        right_text = Text()
+        right_text.append("ESC ", style="bold")
+        right_text.append("quit ", style="dim")
+        right_text.append("↑↓ ", style="bold") 
+        right_text.append("navigate ", style="dim")
+        right_text.append("ENTER ", style="bold")
+        right_text.append("select ", style="dim")
+        right_text.append("TAB ", style="bold")
+        right_text.append("mode", style="dim")
+        
+        # Create full width text with padding
+        full_text = Text()
+        full_text.append(left_text)
+        
+        # Calculate padding to right-align
+        terminal_width = self.size.width if self.size else 80
+        used_width = len(left_text) + len(right_text)
+        padding = max(0, terminal_width - used_width)
+        
+        full_text.append(" " * padding)
+        full_text.append(right_text)
+        
+        return full_text
+
 class LoadingIndicator(Static):
     """Shows loading state with spinner."""
     
@@ -250,16 +299,18 @@ class FuzzyShellApp(App):
         margin: 1;
     }
     
-    #status-bar {
-        dock: bottom;
-        height: 1;
-    }
-    
     #description-pane {
         dock: bottom;
         height: 3;
         margin: 1;
         border: solid $accent;
+    }
+    
+    #status-footer {
+        dock: bottom;
+        height: 1;
+        background: $panel;
+        color: $text;
     }
     
     SearchResult {
@@ -309,13 +360,10 @@ class FuzzyShellApp(App):
         description_pane.id = "description-pane"
         yield description_pane
         
-        # Status bar
-        status_bar = StatusBar()
-        status_bar.id = "status-bar"
-        yield status_bar
-        
-        # Footer with keybindings
-        yield Footer()
+        # Combined footer with status and keybindings
+        footer = StatusFooter()
+        footer.id = "status-footer"
+        yield footer
 
     def on_mount(self) -> None:
         """When app is mounted, setup and focus."""
@@ -324,19 +372,15 @@ class FuzzyShellApp(App):
         # Update status bar with initial info
         if self.fuzzyshell:
             try:
-                # Get database stats
-                cursor = self.fuzzyshell.conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM commands")
-                count = cursor.fetchone()[0]
+                # Get comprehensive database info
+                db_info = self.fuzzyshell.get_database_info()
                 
-                status_bar = self.query_one("#status-bar", StatusBar)
-                status_bar.item_count = count
+                footer = self.query_one("#status-footer", StatusFooter)
+                footer.item_count = db_info['item_count']
+                footer.embedding_model = db_info['embedding_model']
                 
-                # Estimate database size (rough)
-                status_bar.database_size = f"{count * 50 // 1024}KB"  # Rough estimate
-                
-            except Exception:
-                pass  # Ignore errors during startup
+            except Exception as e:
+                logger.debug("Error updating status bar: %s", str(e))
                 
         # Update mode indicator
         mode_indicator = self.query_one("#mode-indicator", SearchModeIndicator)
@@ -397,8 +441,8 @@ class FuzzyShellApp(App):
             search_time = time.time() - start_time
             
             # Update status bar with search time
-            status_bar = self.query_one("#status-bar", StatusBar)
-            status_bar.search_time = search_time
+            footer = self.query_one("#status-footer", StatusFooter)
+            footer.search_time = search_time
             
             self.current_results = results
             self._display_results(results)
@@ -454,8 +498,8 @@ class FuzzyShellApp(App):
         description_pane._current_command = None
         
         # Clear search time
-        status_bar = self.query_one("#status-bar", StatusBar)
-        status_bar.search_time = 0.0
+        footer = self.query_one("#status-footer", StatusFooter)
+        footer.search_time = 0.0
         
     def on_input_changed(self, event: Input.Changed) -> None:
         """Handle input changes with debouncing."""

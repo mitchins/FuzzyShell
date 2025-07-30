@@ -220,6 +220,84 @@ class FuzzyShell:
                 self._model_ready is not None and 
                 self._model_ready.is_set())
     
+    def get_indexed_count(self):
+        """Get the total number of indexed commands from metadata (more accurate)."""
+        try:
+            return int(self.get_metadata('item_count', '0'))
+        except Exception as e:
+            logger.error("Error getting indexed count from metadata: %s", str(e))
+            # Fallback to direct count
+            try:
+                c = self.conn.cursor()
+                c.execute('SELECT COUNT(*) FROM commands')
+                return c.fetchone()[0]
+            except Exception:
+                return 0
+    
+    def get_metadata(self, key, default=None):
+        """Get a metadata value by key."""
+        try:
+            c = self.conn.cursor()
+            c.execute('SELECT value FROM metadata WHERE key = ?', (key,))
+            result = c.fetchone()
+            return result[0] if result else default
+        except Exception as e:
+            logger.error("Error getting metadata key '%s': %s", key, str(e))
+            return default
+    
+    def set_metadata(self, key, value):
+        """Set a metadata key-value pair."""
+        try:
+            c = self.conn.cursor()
+            c.execute('''
+                INSERT OR REPLACE INTO metadata (key, value, updated_at) 
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            ''', (key, str(value)))
+            self.conn.commit()
+        except Exception as e:
+            logger.error("Error setting metadata key '%s': %s", key, str(e))
+    
+    def _init_metadata(self):
+        """Initialize metadata with default values."""
+        # Set schema version for future migrations
+        if not self.get_metadata('schema_version'):
+            self.set_metadata('schema_version', '1.0')
+        
+        # Set embedding model version
+        if not self.get_metadata('embedding_model'):
+            self.set_metadata('embedding_model', 'all-MiniLM-L6-v2')
+        
+        # Set initial item count if not exists
+        if not self.get_metadata('item_count'):
+            # Count existing items for initial setup
+            try:
+                c = self.conn.cursor()
+                c.execute('SELECT COUNT(*) FROM commands')
+                count = c.fetchone()[0]
+                self.set_metadata('item_count', count)
+            except Exception:
+                self.set_metadata('item_count', 0)
+    
+    def _update_item_count(self):
+        """Update the item count in metadata to ensure accuracy."""
+        try:
+            c = self.conn.cursor()
+            c.execute('SELECT COUNT(*) FROM commands')
+            count = c.fetchone()[0]
+            self.set_metadata('item_count', count)
+            logger.debug("Updated item count to %d", count)
+        except Exception as e:
+            logger.error("Error updating item count: %s", str(e))
+    
+    def get_database_info(self):
+        """Get comprehensive database information for status display."""
+        return {
+            'item_count': self.get_indexed_count(),
+            'embedding_model': self.get_metadata('embedding_model', 'unknown'),
+            'schema_version': self.get_metadata('schema_version', '1.0'),
+            'last_updated': self.get_metadata('last_updated', 'never')
+        }
+    
     def optimize_db_connection(self):
         """Apply SQLite optimizations"""
         c = self.conn.cursor()
@@ -248,6 +326,15 @@ class FuzzyShell:
         
         # Create indices for better query performance
         c.execute('CREATE INDEX IF NOT EXISTS idx_commands_last_used ON commands(last_used)')
+        
+        # Create metadata table for tracking database state and versions
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         # Create table for embeddings with quantized storage
         # Note: VSS module handles its own indexing, fallback to regular table if not available
@@ -303,6 +390,9 @@ class FuzzyShell:
         
         # Index for cache cleanup
         c.execute('CREATE INDEX IF NOT EXISTS idx_cache_timestamp ON query_cache(timestamp)')
+        
+        # Initialize metadata with default values
+        self._init_metadata()
         
         self.conn.commit()
         
@@ -503,6 +593,12 @@ class FuzzyShell:
         
         self.conn.commit()
         self.update_corpus_stats()
+        
+        # Update accurate item count in metadata
+        self._update_item_count()
+        
+        # Update last ingestion timestamp
+        self.set_metadata('last_updated', time.strftime('%Y-%m-%d %H:%M:%S'))
         
         total_time = time.time() - start_time
         process_time = time.time() - process_start
