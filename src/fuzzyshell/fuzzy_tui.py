@@ -2,6 +2,7 @@ import time
 import asyncio
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal, Vertical
+from textual.scroll_view import ScrollView
 from textual.widgets import Input, Footer, Static, ProgressBar
 from textual.reactive import reactive
 from textual.binding import Binding
@@ -322,6 +323,10 @@ class FuzzyShellApp(App):
         Binding("ctrl+c", "quit", "Quit", show=False),
         Binding("up,k", "cursor_up", "Previous", show=True),
         Binding("down,j", "cursor_down", "Next", show=True),
+        Binding("pageup,ctrl+u", "page_up", "Page Up", show=False),
+        Binding("pagedown,ctrl+d", "page_down", "Page Down", show=False),
+        Binding("home,ctrl+a", "go_to_top", "Top", show=False),
+        Binding("end,ctrl+e", "go_to_bottom", "Bottom", show=False),
         Binding("enter", "select_command", "Select", show=True),
         Binding("tab", "cycle_search_mode", "Mode", show=True),
         Binding("ctrl+r", "refresh", "Refresh", show=True),
@@ -348,8 +353,11 @@ class FuzzyShellApp(App):
     
     #results-container {
         height: 1fr;
-        overflow-y: auto;
         margin: 1;
+    }
+    
+    #results-inner {
+        width: 100%;
     }
     
     #description-pane {
@@ -383,7 +391,8 @@ class FuzzyShellApp(App):
         self.fuzzyshell = fuzzyshell_instance
         self.selected_index = 0
         self._last_search_time = 0
-        self._search_delay = 0.15  # 150ms debounce delay
+        self._search_delay = 0.05  # 50ms debounce delay (reduced for responsiveness)
+        self._pending_search = None  # Track pending searches
         self.search_mode = "hybrid"
         self.current_results = []
         
@@ -405,8 +414,9 @@ class FuzzyShellApp(App):
         loading.id = "loading"
         yield loading
         
-        # Results container
-        yield Container(id="results-container")
+        # Results container with scrolling
+        with ScrollView(id="results-container"):
+            yield Container(id="results-inner")
         
         # Description pane
         description_pane = CommandDescriptionPane()
@@ -474,7 +484,7 @@ class FuzzyShellApp(App):
         footer.show_scores = self.show_scores
         
         # Refresh results display to show/hide scores
-        results_container = self.query_one("#results-container", Container)
+        results_container = self.query_one("#results-inner", Container)
         results_container.remove_children()
         
         # Re-display current results with updated score visibility
@@ -523,7 +533,7 @@ class FuzzyShellApp(App):
     
     def _display_results(self, results) -> None:
         """Display search results."""
-        results_container = self.query_one("#results-container")
+        results_container = self.query_one("#results-inner")
         results_container.remove_children()
         
         if not results:
@@ -554,7 +564,7 @@ class FuzzyShellApp(App):
     
     def _display_error(self, error_message: str) -> None:
         """Display error message."""
-        results_container = self.query_one("#results-container")
+        results_container = self.query_one("#results-inner")
         results_container.remove_children()
         results_container.mount(
             Static(error_message, classes="error")
@@ -562,7 +572,7 @@ class FuzzyShellApp(App):
     
     def _clear_results(self) -> None:
         """Clear all results."""
-        results_container = self.query_one("#results-container")
+        results_container = self.query_one("#results-inner")
         results_container.remove_children()
         self.current_results = []
         self.selected_index = 0
@@ -578,20 +588,30 @@ class FuzzyShellApp(App):
         footer.search_time = 0.0
         
     def on_input_changed(self, event: Input.Changed) -> None:
-        """Handle input changes with debouncing."""
+        """Handle input changes with improved debouncing."""
         query = event.value.strip()
-        current_time = time.time()
         
         # Clear results immediately if query is empty
         if not query:
             self._clear_results()
+            if self._pending_search:
+                self._pending_search.stop()
+                self._pending_search = None
             return
-            
-        # Debounce the search
-        if current_time - self._last_search_time < self._search_delay:
-            return
-            
-        self._last_search_time = current_time
+        
+        # Stop any pending search
+        if self._pending_search:
+            self._pending_search.stop()
+        
+        # Schedule new search with debouncing
+        self._pending_search = self.set_timer(
+            self._search_delay, 
+            lambda: self._perform_search_scheduled(query)
+        )
+    
+    def _perform_search_scheduled(self, query: str) -> None:
+        """Perform scheduled search and clear pending search."""
+        self._pending_search = None
         self._perform_search(query)
     
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -599,8 +619,8 @@ class FuzzyShellApp(App):
         self.action_select_command()
     
     def _select_result(self, index: int) -> None:
-        """Select a result by index."""
-        results = self.query_one("#results-container").children
+        """Select a result by index with automatic scrolling."""
+        results = self.query_one("#results-inner").children
         if not results or not isinstance(results[0], SearchResult):
             return
             
@@ -608,18 +628,60 @@ class FuzzyShellApp(App):
         index = max(0, min(index, len(results) - 1))
         
         # Update selection
+        selected_widget = None
         for i, result in enumerate(results):
             if isinstance(result, SearchResult):
                 result.is_selected = (i == index)
                 if i == index:
                     result.add_class("selected")
+                    selected_widget = result
                     # Trigger description generation for selected command
                     description_pane = self.query_one("#description-pane", CommandDescriptionPane)
                     description_pane.generate_description_async(result.command)
                 else:
                     result.remove_class("selected")
+        
+        # Auto-scroll to keep selected item visible
+        if selected_widget:
+            scroll_view = self.query_one("#results-container", ScrollView)
+            # Use call_after_refresh to ensure widget is properly laid out
+            self.call_after_refresh(lambda: self._scroll_to_selection(scroll_view, selected_widget, index))
                     
         self.selected_index = index
+    
+    def _scroll_to_selection(self, scroll_view: ScrollView, selected_widget, index: int) -> None:
+        """Robust scrolling to keep selection visible with fallback methods."""
+        try:
+            # Primary method: scroll_to_widget
+            success = scroll_view.scroll_to_widget(selected_widget, animate=False, top=False)
+            if success:
+                return
+        except Exception as e:
+            # Fallback: manual scroll calculation
+            pass
+        
+        try:
+            # Fallback method: calculate scroll position manually
+            # Each SearchResult widget is 1 line high
+            line_height = 1
+            scroll_y = index * line_height
+            
+            # Get visible area height (approximate)
+            visible_height = scroll_view.size.height - 2  # Account for margins
+            
+            # Scroll to keep selection in middle third of visible area
+            target_scroll = max(0, scroll_y - visible_height // 3)
+            scroll_view.scroll_to(0, target_scroll, animate=False)
+            
+        except Exception as e:
+            # Last resort: simple scroll down/up based on direction
+            if hasattr(self, '_last_selected_index'):
+                if index > getattr(self, '_last_selected_index', 0):
+                    scroll_view.scroll_down()
+                elif index < getattr(self, '_last_selected_index', 0):
+                    scroll_view.scroll_up()
+            
+            self._last_selected_index = index
         
     def action_cursor_up(self) -> None:
         """Move selection up."""
@@ -628,6 +690,25 @@ class FuzzyShellApp(App):
     def action_cursor_down(self) -> None:
         """Move selection down."""
         self._select_result(self.selected_index + 1)
+    
+    def action_page_up(self) -> None:
+        """Move selection up by one page."""
+        # Move up by ~10 items (approximate page size)
+        self._select_result(self.selected_index - 10)
+    
+    def action_page_down(self) -> None:
+        """Move selection down by one page."""
+        # Move down by ~10 items (approximate page size)
+        self._select_result(self.selected_index + 10)
+    
+    def action_go_to_top(self) -> None:
+        """Go to the first result."""
+        self._select_result(0)
+    
+    def action_go_to_bottom(self) -> None:
+        """Go to the last result."""
+        if self.current_results:
+            self._select_result(len(self.current_results) - 1)
         
     def action_select_command(self) -> None:
         """Select the current command and exit the app."""

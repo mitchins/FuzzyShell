@@ -36,6 +36,10 @@ logger.setLevel(logging.DEBUG)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
+# Configuration constants for embedding storage
+EMBEDDING_DTYPE = np.float16  # Options: np.int8, np.float16, np.float32
+EMBEDDING_SCALE_FACTOR = 127  # Only used for INT8 quantization
+
 class FuzzyShell:
     def __init__(self, db_path='fuzzyshell.db', conn=None):
         self.db_path = db_path
@@ -118,19 +122,189 @@ class FuzzyShell:
             self._model = None
             return None
             
-    def quantize_embedding(self, embedding, scale_factor=127):
-        """Quantize embedding to INT8 (-127 to 127 range)"""
+    def quantize_embedding(self, embedding, scale_factor=EMBEDDING_SCALE_FACTOR):
+        """
+        Store embedding in the configured format (INT8, FP16, or FP32).
+        Returns bytes ready for database storage.
+        """
         start_time = time.time()
-        # Normalize the embedding to unit length
-        embedding = embedding / np.linalg.norm(embedding)
-        # Scale to INT8 range and quantize
-        result = np.clip(np.round(embedding * scale_factor), -127, 127).astype(np.int8)
-        logger.debug("Quantized embedding in %.3fs", time.time() - start_time)
+        
+        if EMBEDDING_DTYPE == np.int8:
+            # Legacy INT8 quantization with normalization
+            embedding = embedding / np.linalg.norm(embedding)
+            result = np.clip(np.round(embedding * scale_factor), -127, 127).astype(np.int8)
+            logger.debug("Quantized embedding to INT8 in %.3fs", time.time() - start_time)
+        elif EMBEDDING_DTYPE == np.float16:
+            # FP16 storage - good balance of quality vs size
+            result = embedding.astype(np.float16)
+            logger.debug("Converted embedding to FP16 in %.3fs", time.time() - start_time)
+        elif EMBEDDING_DTYPE == np.float32:
+            # FP32 storage - full precision
+            result = embedding.astype(np.float32)
+            logger.debug("Stored embedding as FP32 in %.3fs", time.time() - start_time)
+        else:
+            raise ValueError(f"Unsupported EMBEDDING_DTYPE: {EMBEDDING_DTYPE}")
+            
         return result
     
-    def dequantize_embedding(self, quantized_embedding, scale_factor=127):
-        """Dequantize INT8 embedding back to float32"""
-        return (quantized_embedding.astype(np.float32) / scale_factor)
+    def dequantize_embedding(self, stored_embedding, scale_factor=EMBEDDING_SCALE_FACTOR):
+        """
+        Convert stored embedding back to float32 for computation.
+        Handles INT8, FP16, and FP32 storage formats.
+        """
+        if EMBEDDING_DTYPE == np.int8:
+            # Dequantize INT8 back to float32
+            return stored_embedding.astype(np.float32) / scale_factor
+        elif EMBEDDING_DTYPE == np.float16:
+            # Convert FP16 to FP32 for computation
+            return stored_embedding.astype(np.float32)
+        elif EMBEDDING_DTYPE == np.float32:
+            # Already FP32, return as-is
+            return stored_embedding
+        else:
+            raise ValueError(f"Unsupported EMBEDDING_DTYPE: {EMBEDDING_DTYPE}")
+    
+    def _dynamic_hybrid_score(self, semantic_score, bm25_score):
+        """
+        Dynamic hybrid scoring that adjusts weights based on relative strengths:
+        - High BM25, low semantic: prioritize keywords (favor BM25)
+        - High semantic, low BM25: prioritize embeddings (favor semantic)
+        - Both high/low or similar: use balanced 50/50 weighting
+        """
+        # Threshold for considering a score "high"
+        high_threshold = 0.6
+        
+        # Calculate absolute difference to determine if scores are similar
+        score_diff = abs(semantic_score - bm25_score)
+        
+        if bm25_score > high_threshold and semantic_score < high_threshold and score_diff > 0.3:
+            # High BM25, low semantic → prioritize keywords (70% BM25)
+            return 0.3 * semantic_score + 0.7 * bm25_score
+        elif semantic_score > high_threshold and bm25_score < high_threshold and score_diff > 0.3:
+            # High semantic, low BM25 → prioritize embeddings (70% semantic)
+            return 0.7 * semantic_score + 0.3 * bm25_score
+        else:
+            # Balanced scoring for all other cases (50/50)
+            return 0.5 * semantic_score + 0.5 * bm25_score
+    
+    def _kmeans_numpy(self, X, k, max_iters=100, tol=1e-4):
+        """
+        Pure NumPy K-means clustering implementation for coarse-to-fine pruning.
+        
+        Args:
+            X: Data points (n_samples, n_features)
+            k: Number of clusters
+            max_iters: Maximum iterations
+            tol: Convergence tolerance
+            
+        Returns:
+            centroids: Cluster centers (k, n_features)
+            labels: Cluster labels for each point (n_samples,)
+        """
+        n_samples, n_features = X.shape
+        
+        # Initialize centroids randomly
+        np.random.seed(42)  # For reproducibility
+        centroids = X[np.random.choice(n_samples, k, replace=False)]
+        
+        for _ in range(max_iters):
+            # Assign points to nearest centroid
+            distances = np.sqrt(((X - centroids[:, np.newaxis])**2).sum(axis=2))
+            labels = np.argmin(distances, axis=0)
+            
+            # Update centroids
+            new_centroids = np.array([
+                X[labels == i].mean(axis=0) if np.sum(labels == i) > 0 else centroids[i]
+                for i in range(k)
+            ])
+            
+            # Check convergence
+            if np.allclose(centroids, new_centroids, atol=tol):
+                break
+                
+            centroids = new_centroids
+            
+        return centroids, labels
+    
+    def _build_embedding_clusters(self, force_rebuild=False):
+        """
+        Build K-means clusters for embeddings for coarse-to-fine search.
+        Clusters are cached and rebuilt only when necessary.
+        """
+        cluster_cache_path = os.path.join(self.db_path.replace('.db', '_clusters.pkl'))
+        
+        # Check if we need to rebuild clusters
+        if not force_rebuild and os.path.exists(cluster_cache_path):
+            # Check if cache is newer than database
+            cache_mtime = os.path.getmtime(cluster_cache_path)
+            db_mtime = os.path.getmtime(self.db_path)
+            
+            if cache_mtime > db_mtime:
+                try:
+                    with open(cluster_cache_path, 'rb') as f:
+                        cluster_data = pickle.load(f)
+                    logger.debug("Loaded cached embedding clusters")
+                    return cluster_data
+                except Exception as e:
+                    logger.warning("Failed to load cached clusters: %s", e)
+        
+        # Build new clusters
+        logger.info("Building embedding clusters for faster search...")
+        
+        with sqlite3.connect(self.db_path) as conn:
+            c = conn.cursor()
+            c.execute("SELECT c.id, c.command, e.embedding FROM commands c JOIN embeddings e ON c.id = e.rowid")
+            all_data = c.fetchall()
+        
+        if len(all_data) < 50:  # Not enough data for clustering
+            return None
+            
+        # Extract embeddings based on storage format
+        embeddings_list = []
+        for _, _, emb in all_data:
+            if EMBEDDING_DTYPE == np.int8:
+                stored_emb = np.frombuffer(emb, dtype=np.int8)[:384]
+            elif EMBEDDING_DTYPE == np.float16:
+                stored_emb = np.frombuffer(emb, dtype=np.float16)[:384]
+            elif EMBEDDING_DTYPE == np.float32:
+                stored_emb = np.frombuffer(emb, dtype=np.float32)[:384]
+            else:
+                raise ValueError(f"Unsupported EMBEDDING_DTYPE: {EMBEDDING_DTYPE}")
+            
+            embeddings_list.append(self.dequantize_embedding(stored_emb))
+        
+        embeddings = np.vstack(embeddings_list)
+        
+        # Determine number of clusters (roughly sqrt(n) clusters)
+        n_clusters = max(10, min(100, int(np.sqrt(len(all_data)))))
+        logger.debug("Creating %d clusters for %d commands", n_clusters, len(all_data))
+        
+        # Build clusters
+        centroids, labels = self._kmeans_numpy(embeddings, n_clusters)
+        
+        # Build cluster mapping
+        cluster_data = {
+            'centroids': centroids,
+            'cluster_map': {},  # cluster_id -> [command_ids]
+            'command_clusters': {}  # command_id -> cluster_id
+        }
+        
+        for i, (cmd_id, command, _) in enumerate(all_data):
+            cluster_id = labels[i]
+            if cluster_id not in cluster_data['cluster_map']:
+                cluster_data['cluster_map'][cluster_id] = []
+            cluster_data['cluster_map'][cluster_id].append((cmd_id, command))
+            cluster_data['command_clusters'][cmd_id] = cluster_id
+        
+        # Cache the clusters
+        try:
+            with open(cluster_cache_path, 'wb') as f:
+                pickle.dump(cluster_data, f)
+            logger.debug("Cached embedding clusters to %s", cluster_cache_path)
+        except Exception as e:
+            logger.warning("Failed to cache clusters: %s", e)
+            
+        return cluster_data
 
     def _init_model_async(self):
         """Initialize model in background thread"""
@@ -207,7 +381,7 @@ class FuzzyShell:
                 
         return self._model
         
-    def basic_search(self, query, top_k=5):
+    def basic_search(self, query, top_k=50):
         """Fallback search using simple substring matching"""
         if not query or query.isspace():
             return []
@@ -282,6 +456,17 @@ class FuzzyShell:
         if not self.get_metadata('embedding_model'):
             self.set_metadata('embedding_model', 'minilm-l6-v2-terminal-describer')
         
+        # Store embedding quantization level for compatibility checking
+        dtype_str = str(EMBEDDING_DTYPE).replace("<class 'numpy.", "").replace("'>", "")
+        if not self.get_metadata('embedding_dtype'):
+            self.set_metadata('embedding_dtype', dtype_str)
+        else:
+            # Warn if dtype has changed (requires re-ingestion)
+            stored_dtype = self.get_metadata('embedding_dtype')
+            if stored_dtype != dtype_str:
+                logger.warning("Embedding dtype changed from %s to %s - you may need to regenerate the database for best quality", 
+                              stored_dtype, dtype_str)
+        
         # Set initial item count if not exists
         if not self.get_metadata('item_count'):
             # Count existing items for initial setup
@@ -313,6 +498,7 @@ class FuzzyShell:
         return {
             'item_count': self.get_indexed_count(),
             'embedding_model': self.get_metadata('embedding_model', 'unknown'),
+            'embedding_dtype': self.get_metadata('embedding_dtype', 'int8'),
             'schema_version': self.get_metadata('schema_version', '1.0'),
             'last_updated': self.get_metadata('last_updated', 'never'),
             'db_size_bytes': db_size_bytes,
@@ -542,11 +728,50 @@ class FuzzyShell:
         return raw_command.strip()
 
     def tokenize(self, text):
-        """Convert text to lowercase and split into terms"""
+        """
+        Optimized tokenization for BM25 search:
+        - Focus on mid-to-low frequency terms
+        - Filter out ultra-common stopwords and single characters
+        - Remove one-off typos by requiring minimum length
+        """
         start_time = time.time()
+        
+        # Common shell/command stopwords to exclude from BM25 indexing
+        SHELL_STOPWORDS = {
+            'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'for', 'from',
+            'in', 'is', 'it', 'of', 'on', 'or', 'to', 'the', 'that', 'this',
+            'with', 'will', 'was', 'were', 'been', 'have', 'has', 'had',
+            # Shell-specific common terms that add little search value
+            'run', 'cmd', 'sh', 'bash', 'exe', 'bin', 'usr', 'var', 'tmp',
+            'home', 'root', 'etc', 'opt', 'dev', 'proc', 'sys'
+        }
+        
+        # Extract tokens including punctuation for command structure
         tokens = re.findall(r'\w+|[^\w\s]', text.lower())
-        logger.debug("Tokenized text in %.3fs (%d tokens)", time.time() - start_time, len(tokens))
-        return tokens
+        
+        # Filter tokens for better BM25 precision
+        filtered_tokens = []
+        for token in tokens:
+            # Keep punctuation as it's important for command structure
+            if not token.isalnum():
+                filtered_tokens.append(token)
+                continue
+                
+            # Skip ultra-short tokens (likely typos or noise)
+            if len(token) < 2:
+                continue
+            # Skip common stopwords
+            if token in SHELL_STOPWORDS:
+                continue
+            # Skip purely numeric tokens that are too long (likely timestamps)
+            if token.isdigit() and len(token) > 5:
+                continue
+            
+            filtered_tokens.append(token)
+        
+        logger.debug("Tokenized text in %.3fs (%d->%d tokens)", 
+                    time.time() - start_time, len(tokens), len(filtered_tokens))
+        return filtered_tokens
 
     def update_corpus_stats(self):
         """Update the average document length and total document count"""
@@ -753,7 +978,7 @@ class FuzzyShell:
         """, (query_hash, pickle.dumps(results)))
         self.conn.commit()
 
-    def search(self, query, top_k=5, return_scores=False):
+    def search(self, query, top_k=100, return_scores=False):
         """Search for commands using hybrid BM25 + semantic search"""
         start_time = time.time()
         logger.debug("Starting search for query: %s (return_scores=%s)", query, return_scores)
@@ -842,18 +1067,36 @@ class FuzzyShell:
         
         # Convert embeddings to numpy array for vectorized operations
         embed_start = time.time()
-        embeddings_array = np.vstack([
-            np.frombuffer(emb, dtype=np.int8)[:384] for emb in embeddings  # Note: stored as INT8, ensure 384 dimensions
-        ])
-        logger.debug("Loaded embeddings with shape %s", embeddings_array.shape)
+        
+        # Load embeddings based on configured storage format
+        embeddings_list = []
+        
+        for emb in embeddings:
+            if EMBEDDING_DTYPE == np.int8:
+                # Load INT8 and dequantize
+                stored_emb = np.frombuffer(emb, dtype=np.int8)[:384]
+                embeddings_list.append(self.dequantize_embedding(stored_emb))
+            elif EMBEDDING_DTYPE == np.float16:
+                # Load FP16 and convert to FP32 for computation
+                stored_emb = np.frombuffer(emb, dtype=np.float16)[:384]
+                embeddings_list.append(self.dequantize_embedding(stored_emb))
+            elif EMBEDDING_DTYPE == np.float32:
+                # Load FP32 directly
+                stored_emb = np.frombuffer(emb, dtype=np.float32)[:384]
+                embeddings_list.append(self.dequantize_embedding(stored_emb))
+            else:
+                raise ValueError(f"Unsupported EMBEDDING_DTYPE: {EMBEDDING_DTYPE}")
+        
+        embeddings_array = np.vstack(embeddings_list)
+        logger.debug("Loaded %s embeddings with shape %s", 
+                    str(EMBEDDING_DTYPE).split('.')[-1], embeddings_array.shape)
         
         # First ensure query embedding is the right shape
         logger.debug("Query embedding shape before processing: %s", query_embedding.shape)
         query_embedding = np.array(query_embedding).flatten()[:384]  # Ensure 1D array of right size
         logger.debug("Query embedding shape after flattening and truncating: %s", query_embedding.shape)
         
-        # Dequantize embeddings for comparison (convert INT8 back to float32)
-        embeddings_array = self.dequantize_embedding(embeddings_array)
+        # Query embedding still needs dequantization since it comes from model as INT8
         query_embedding = self.dequantize_embedding(query_embedding)
         logger.debug("Query embedding shape after dequantizing: %s", query_embedding.shape)
         
@@ -891,9 +1134,11 @@ class FuzzyShell:
             bm25_scores = bm25_scores / max_score  # Normalize to [0, 1]
             bm25_scores = np.clip(bm25_scores, 0, 1)
         
-        # Combine scores with weighted average (strongly favoring exact matches)
-        # BM25 gets 0.85 weight (exact matches), semantic gets 0.15 (meaning/context)
-        combined_scores = 0.15 * semantic_scores + 0.85 * bm25_scores
+        # Dynamic hybrid scoring: adjust weights based on score strengths
+        combined_scores = np.array([
+            self._dynamic_hybrid_score(sem, bm25) 
+            for sem, bm25 in zip(semantic_scores, bm25_scores)
+        ])
         results = []
         for i, (command, combined_score) in enumerate(zip(commands, combined_scores)):
             if return_scores:
