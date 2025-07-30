@@ -10,6 +10,11 @@ from rich.text import Text
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
 from rich.panel import Panel
+import asyncio
+import threading
+import logging
+
+logger = logging.getLogger('FuzzyShell.TUI')
 # Import version to avoid circular import
 try:
     from . import __version__
@@ -103,6 +108,85 @@ class LoadingIndicator(Static):
         
         return text
 
+class CommandDescriptionPane(Static):
+    """Widget to display command descriptions using T5-small model."""
+    
+    description = reactive("")
+    is_loading = reactive(False)
+    
+    def __init__(self):
+        super().__init__()
+        self._description_handler = None
+        self._current_command = None
+        self._init_lock = threading.Lock()
+        self.border_title = "Description"
+        
+    def render(self):
+        """Render the description pane."""
+        if self.is_loading:
+            text = Text()
+            spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+            spinner_index = int(time.time() * 10) % len(spinner_chars)
+            spinner = spinner_chars[spinner_index]
+            text.append(f"{spinner} ", style="cyan bold")
+            text.append("Generating description...", style="dim italic")
+            return text
+        elif self.description:
+            text = Text()
+            text.append("📝 ", style="blue")
+            text.append(self.description, style="white")
+            return text
+        else:
+            text = Text()
+            text.append("💡 ", style="dim")
+            text.append("Select a command to see its description", style="dim")
+            return text
+    
+    def _init_description_handler(self):
+        """Initialize the description handler lazily with thread safety."""
+        with self._init_lock:
+            if self._description_handler is None:
+                try:
+                    from .model_handler import DescriptionHandler
+                    self._description_handler = DescriptionHandler()
+                except Exception as e:
+                    logger.error("Failed to initialize DescriptionHandler: %s", str(e))
+                    self._description_handler = False  # Mark as failed
+        return self._description_handler if self._description_handler is not False else None
+    
+    def generate_description_async(self, command: str):
+        """Generate description for a command asynchronously."""
+        if not command or command == self._current_command:
+            return
+            
+        self._current_command = command
+        self.is_loading = True
+        self.description = ""
+        
+        def generate_in_thread():
+            try:
+                handler = self._init_description_handler()
+                if handler is None:
+                    # Fallback description if handler failed to initialize
+                    desc = f"Command: {command}"
+                else:
+                    desc = handler.generate_description(command)
+                
+                # Update UI on main thread
+                self.app.call_from_thread(self._update_description, desc)
+            except Exception as e:
+                logger.error("Error in description generation thread: %s", str(e))
+                # Fallback on error
+                self.app.call_from_thread(self._update_description, f"Command: {command}")
+        
+        thread = threading.Thread(target=generate_in_thread, daemon=True)
+        thread.start()
+    
+    def _update_description(self, desc: str):
+        """Update description on main thread."""
+        self.is_loading = False
+        self.description = desc
+
 class SearchResult(Static):
     """A widget to display a single search result with enhanced styling."""
     
@@ -171,6 +255,13 @@ class FuzzyShellApp(App):
         height: 1;
     }
     
+    #description-pane {
+        dock: bottom;
+        height: 3;
+        margin: 1;
+        border: solid $accent;
+    }
+    
     SearchResult {
         height: 1;
         padding: 0 1;
@@ -212,6 +303,11 @@ class FuzzyShellApp(App):
         
         # Results container
         yield Container(id="results-container")
+        
+        # Description pane
+        description_pane = CommandDescriptionPane()
+        description_pane.id = "description-pane"
+        yield description_pane
         
         # Status bar
         status_bar = StatusBar()
@@ -329,6 +425,9 @@ class FuzzyShellApp(App):
             if i == 0:  # Select first result
                 result_widget.is_selected = True
                 result_widget.add_class("selected")
+                # Generate description for first result
+                description_pane = self.query_one("#description-pane", CommandDescriptionPane)
+                description_pane.generate_description_async(cmd)
             results_container.mount(result_widget)
             
         self.selected_index = 0
@@ -347,6 +446,12 @@ class FuzzyShellApp(App):
         results_container.remove_children()
         self.current_results = []
         self.selected_index = 0
+        
+        # Clear description
+        description_pane = self.query_one("#description-pane", CommandDescriptionPane)
+        description_pane.description = ""
+        description_pane.is_loading = False
+        description_pane._current_command = None
         
         # Clear search time
         status_bar = self.query_one("#status-bar", StatusBar)
@@ -388,6 +493,9 @@ class FuzzyShellApp(App):
                 result.is_selected = (i == index)
                 if i == index:
                     result.add_class("selected")
+                    # Trigger description generation for selected command
+                    description_pane = self.query_one("#description-pane", CommandDescriptionPane)
+                    description_pane.generate_description_async(result.command)
                 else:
                     result.remove_class("selected")
                     
