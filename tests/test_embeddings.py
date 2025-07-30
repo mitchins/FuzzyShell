@@ -4,13 +4,14 @@ import tempfile
 import os
 from unittest.mock import patch, MagicMock
 from fuzzyshell import FuzzyShell
+from .test_helpers import create_test_db_connection
 
 @pytest.fixture
-def temp_db():
-    temp = tempfile.NamedTemporaryFile(delete=False)
-    temp.close()
-    yield temp.name
-    os.unlink(temp.name)
+def memory_db():
+    # Use dependency injection with in-memory SQLite database
+    conn = create_test_db_connection()
+    yield conn
+    conn.close()
 
 @pytest.fixture
 def temp_history():
@@ -38,8 +39,8 @@ def mock_model():
         yield mock
 
 @pytest.fixture
-def fs_with_model(temp_db, mock_model):
-    fs = FuzzyShell(db_path=temp_db)
+def fs_with_model(memory_db, mock_model):
+    fs = FuzzyShell(conn=memory_db)
     fs._init_model()  # Force synchronous initialization
     return fs
 

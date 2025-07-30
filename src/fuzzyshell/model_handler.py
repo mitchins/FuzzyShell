@@ -6,7 +6,7 @@ import onnxruntime as ort
 from tokenizers import Tokenizer
 from pathlib import Path
 import logging
-# Modern Python 3.10+ - no need for typing imports for basic types
+from typing import Optional, List
 
 logger = logging.getLogger('FuzzyShell.ModelHandler')
 
@@ -14,7 +14,7 @@ logger = logging.getLogger('FuzzyShell.ModelHandler')
 MODEL_OUTPUT_DIM = 384  # Base model output dimension
 
 class ModelHandler:
-    def __init__(self, model_dir: str | None = None):
+    def __init__(self, model_dir: Optional[str] = None):
         logger.debug("Initializing ModelHandler")
         self.model_dir = model_dir or str(Path.home() / ".fuzzyshell" / "model")
         self.model_path = os.path.join(self.model_dir, "model_quantized.onnx")
@@ -95,7 +95,7 @@ class ModelHandler:
                     raise RuntimeError(f"Failed to download {name}")
                 logger.info("%s download complete", name)
 
-    def encode(self, texts: list[str], truncate_to: int | None = MODEL_OUTPUT_DIM) -> np.ndarray:
+    def encode(self, texts: List[str], truncate_to: Optional[int] = MODEL_OUTPUT_DIM) -> np.ndarray:
         """
         Encode a list of texts to embeddings, returning mean-pooled embeddings with shape (batch_size, MODEL_OUTPUT_DIM).
         
@@ -143,7 +143,7 @@ class ModelHandler:
 
 
 class DescriptionHandler:
-    def __init__(self, model_dir: str | None = None):
+    def __init__(self, model_dir: Optional[str] = None):
         logger.debug("Initializing DescriptionHandler for T5-small")
         self.model_dir = model_dir or str(Path.home() / ".fuzzyshell" / "description_model")
         self.use_t5_model = False

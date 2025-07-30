@@ -37,9 +37,9 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 class FuzzyShell:
-    def __init__(self, db_path='fuzzyshell.db'):
+    def __init__(self, db_path='fuzzyshell.db', conn=None):
         self.db_path = db_path
-        self._conn = None
+        self._conn = conn  # Allow dependency injection of connection
         self._model = None
         self._initialized = False
         self._model_ready = threading.Event()
@@ -53,11 +53,18 @@ class FuzzyShell:
         self.avg_length = 0
         
         # Initialize database on startup
-        _ = self.conn  # This will trigger database initialization
+        if self._conn is not None:
+            # Connection was injected, need to initialize it manually
+            self.optimize_db_connection()
+            self.init_db()
+            self.update_corpus_stats()
+        else:
+            # Will be lazy-initialized when conn property is accessed
+            _ = self.conn
     
     @property
     def conn(self):
-        """Lazy initialize database connection"""
+        """Get database connection (lazy initialize if not injected)"""
         if self._conn is None:
             start_time = time.time()
             if os.path.exists(self.db_path):
@@ -65,8 +72,16 @@ class FuzzyShell:
             else:
                 logger.debug("No existing database, creating new one")
             # Enable memory-mapped I/O and other performance optimizations
+            # Handle both file paths and URI paths (for in-memory databases)
+            if self.db_path.startswith('file:'):
+                # Already a URI, use as-is
+                connect_string = self.db_path
+            else:
+                # Regular file path, add file: prefix and mode
+                connect_string = f"file:{self.db_path}?mode=rwc"
+            
             self._conn = sqlite3.connect(
-                f"file:{self.db_path}?mode=rwc", 
+                connect_string,
                 uri=True,
                 timeout=60.0
             )
@@ -291,24 +306,66 @@ class FuzzyShell:
     
     def get_database_info(self):
         """Get comprehensive database information for status display."""
+        # Calculate database size
+        db_size_bytes = self._get_database_size()
+        db_size_human = self._format_bytes(db_size_bytes)
+        
         return {
             'item_count': self.get_indexed_count(),
             'embedding_model': self.get_metadata('embedding_model', 'unknown'),
             'schema_version': self.get_metadata('schema_version', '1.0'),
-            'last_updated': self.get_metadata('last_updated', 'never')
+            'last_updated': self.get_metadata('last_updated', 'never'),
+            'db_size_bytes': db_size_bytes,
+            'db_size_human': db_size_human
         }
     
+    def _get_database_size(self):
+        """Get database size in bytes."""
+        if hasattr(self, '_conn') and self._conn:
+            # For in-memory databases, estimate size based on page count
+            c = self._conn.cursor()
+            try:
+                c.execute('PRAGMA page_count')
+                page_count = c.fetchone()[0]
+                c.execute('PRAGMA page_size')
+                page_size = c.fetchone()[0]
+                return page_count * page_size
+            except Exception:
+                # Fallback: estimate based on record count
+                return self.get_indexed_count() * 1024  # Rough estimate
+        elif os.path.exists(self.db_path):
+            # For file-based databases
+            return os.path.getsize(self.db_path)
+        else:
+            return 0
+    
+    def _format_bytes(self, size_bytes):
+        """Format bytes into human readable format."""
+        if size_bytes < 1024:
+            return f"{size_bytes}B"
+        elif size_bytes < 1024**2:
+            return f"{size_bytes/1024:.1f}KB"
+        elif size_bytes < 1024**3:
+            return f"{size_bytes/(1024**2):.1f}MB"
+        else:
+            return f"{size_bytes/(1024**3):.1f}GB"
+    
     def optimize_db_connection(self):
-        """Apply SQLite optimizations"""
+        """Apply SQLite optimizations (defensive for in-memory databases)"""
         c = self.conn.cursor()
-        # Memory-mapped I/O
-        c.execute('PRAGMA mmap_size = 30000000000')  # 30GB max mmap
-        # Other performance optimizations
-        c.execute('PRAGMA journal_mode = WAL')  # Write-Ahead Logging
-        c.execute('PRAGMA synchronous = NORMAL')
-        c.execute('PRAGMA cache_size = -2000000')  # 2GB cache
-        c.execute('PRAGMA temp_store = MEMORY')
-        c.execute('PRAGMA case_sensitive_like = false')
+        try:
+            # These optimizations work for both file and in-memory databases
+            c.execute('PRAGMA synchronous = NORMAL')
+            c.execute('PRAGMA cache_size = -2000000')  # 2GB cache
+            c.execute('PRAGMA temp_store = MEMORY')
+            c.execute('PRAGMA case_sensitive_like = false')
+            
+            # These only work for file-based databases
+            if not self.db_path.startswith('file:') or 'memory' not in self.db_path:
+                c.execute('PRAGMA mmap_size = 30000000000')  # 30GB max mmap
+                c.execute('PRAGMA journal_mode = WAL')  # Write-Ahead Logging
+        except Exception as e:
+            logger.debug("Some database optimizations failed: %s", str(e))
 
     def init_db(self):
         start_time = time.time()
@@ -449,6 +506,8 @@ class FuzzyShell:
                          (command_id, quantized))
             
             self.conn.commit()
+            # Update item count metadata after successful addition
+            self._update_item_count()
             
         except sqlite3.Error as e:
             logger.error(f"Error adding command to database: {e}")

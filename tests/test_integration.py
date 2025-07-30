@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
+from .test_helpers import create_test_db_connection
+
 def test_complete_workflow():
     """Test the complete workflow: ingest -> search -> select"""
     print("🔬 Testing complete workflow...")
@@ -21,7 +23,8 @@ def test_complete_workflow():
     try:
         # Test command cleaning
         from fuzzyshell.fuzzyshell import FuzzyShell
-        fs = FuzzyShell()
+        test_conn = create_test_db_connection()
+        fs = FuzzyShell(conn=test_conn)
         
         # Test the cleaning function directly
         raw_command = ': 1753138854:0;python process_tokens.py -c -b "VMA new" "BOQ new" "ME" | jq'
@@ -69,7 +72,8 @@ def test_shell_output_format():
     # We can test the output handling logic
     from fuzzyshell.fuzzyshell import FuzzyShell
     
-    fs = FuzzyShell()
+    test_conn = create_test_db_connection()
+    fs = FuzzyShell(conn=test_conn)
     # Use a unique test command that won't conflict with existing database entries
     test_command = "unique_test_command_12345"
     fs.add_command(test_command)

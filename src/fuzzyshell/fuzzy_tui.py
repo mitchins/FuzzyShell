@@ -387,16 +387,15 @@ class FuzzyShellApp(App):
         mode_indicator.search_mode = self.search_mode
         
     def action_cycle_search_mode(self) -> None:
-        """Cycle through search modes using modern Python match/case."""
-        match self.search_mode:
-            case "hybrid":
-                self.search_mode = "semantic"
-            case "semantic":
-                self.search_mode = "keyword" 
-            case "keyword":
-                self.search_mode = "hybrid"
-            case _:
-                self.search_mode = "hybrid"  # fallback
+        """Cycle through search modes using if/elif for Python 3.9 compatibility."""
+        if self.search_mode == "hybrid":
+            self.search_mode = "semantic"
+        elif self.search_mode == "semantic":
+            self.search_mode = "keyword" 
+        elif self.search_mode == "keyword":
+            self.search_mode = "hybrid"
+        else:
+            self.search_mode = "hybrid"  # fallback
         
         # Update mode indicator
         mode_indicator = self.query_one("#mode-indicator", SearchModeIndicator)

@@ -6,12 +6,14 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from fuzzyshell.fuzzyshell import FuzzyShell
+from .test_helpers import create_test_db_connection
 
 def test_search_quality():
     """Test that search quality is good for basic commands"""
     print("🔍 Testing Search Quality...")
     
-    fs = FuzzyShell()
+    test_conn = create_test_db_connection()
+    fs = FuzzyShell(conn=test_conn)
     
     # Test basic command searches
     test_cases = [
@@ -59,7 +61,8 @@ def test_shell_wrapper_logic():
     
     def simulate_fuzzy_command():
         """Simulate running fuzzy and returning a clean command"""
-        fs = FuzzyShell()
+        test_conn = create_test_db_connection()
+        fs = FuzzyShell(conn=test_conn)
         # Add a test command
         test_cmd = "git status"
         fs.add_command(test_cmd)

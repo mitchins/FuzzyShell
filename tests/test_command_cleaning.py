@@ -37,16 +37,15 @@ def test_modern_functionality():
             self.search_mode = "hybrid"
         
         def cycle_mode(self):
-            """Use modern match/case like in the real app"""
-            match self.search_mode:
-                case "hybrid":
-                    self.search_mode = "semantic"
-                case "semantic":
-                    self.search_mode = "keyword" 
-                case "keyword":
-                    self.search_mode = "hybrid"
-                case _:
-                    self.search_mode = "hybrid"
+            """Use if/elif for Python 3.9 compatibility"""
+            if self.search_mode == "hybrid":
+                self.search_mode = "semantic"
+            elif self.search_mode == "semantic":
+                self.search_mode = "keyword" 
+            elif self.search_mode == "keyword":
+                self.search_mode = "hybrid"
+            else:
+                self.search_mode = "hybrid"
     
     mock_app = MockApp()
     print(f"  Initial mode: {mock_app.search_mode}")
