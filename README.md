@@ -1,17 +1,17 @@
-<table>
+<table border="0" cellpadding="0" cellspacing="0" style="border:none;">
   <tr>
-    <td style="vertical-align: middle; padding-right: 20px;">
+    <td style="vertical-align: middle; padding-right: 24px;">
       <picture>
         <source srcset="mascot_dark.png" media="(prefers-color-scheme: dark)">
-        <img src="mascot_light.png" alt="FuzzyShell Mascot" width="90" height="90">
+        <img src="mascot_light.png" alt="FuzzyShell Mascot" width="96" height="96">
       </picture>
     </td>
     <td style="vertical-align: middle;">
-      <span style="font-size:2.1em; font-weight:bold; line-height:1.1;">FuzzyShell</span><br>
-      <span style="font-size:1.18em; color:var(--fgColor-muted,#6e7781);">
+      <h1 style="font-size:2.6em; font-weight:bold; margin:0; line-height:1.12;">FuzzyShell</h1>
+      <div style="font-size:1.22em; color:var(--fgColor-muted,#6e7781); font-weight: normal; margin-bottom:0.05em;">
         Lightning-fast semantic search for your command history.<br>
         Find that command you ran last week with just a few keystrokes.
-      </span>
+      </div>
     </td>
   </tr>
 </table>
