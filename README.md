@@ -1,6 +1,4 @@
-<p align="center">
-  <span style="font-size:3em; font-weight:bold;">FuzzyShell</span>
-</p>
+# FuzzyShell
 
 <div style="display: flex; justify-content: center; align-items: center; gap: 24px; margin-bottom: 32px;">
   <picture>
