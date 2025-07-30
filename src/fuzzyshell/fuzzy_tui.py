@@ -105,7 +105,8 @@ class StatusFooter(Static):
             left_text.append(f" • {self.item_count:,} items", style="dim")
             if self.embedding_model != "unknown":
                 # Shorten model name for display
-                model_short = self.embedding_model.replace("all-MiniLM-L6-v2", "MiniLM-L6")
+                model_short = self.embedding_model.replace("minilm-l6-v2-terminal-describer", "Terminal-MiniLM")
+                model_short = model_short.replace("all-MiniLM-L6-v2", "MiniLM-L6")  # Legacy compatibility
                 left_text.append(f" ({model_short})", style="dim blue")
         
         if self.search_time > 0:

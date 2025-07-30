@@ -74,14 +74,17 @@ class ModelHandler:
 
     def _ensure_model_files(self):
         """Download model and tokenizer if they don't exist."""
+        # Use custom terminal-trained model instead of base MiniLM
+        base_url = "https://huggingface.co/Mitchins/minilm-l6-v2-terminal-describer-embeddings-ONNX/resolve/main/onnx_conversion/int8"
+        
         files_to_download = {
             'model': (
                 self.model_path,
-                "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/onnx/model_int8.onnx"
+                f"{base_url}/model_quantized.onnx"
             ),
             'tokenizer': (
                 self.tokenizer_path,
-                "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json"
+                f"{base_url}/tokenizer.json"
             )
         }
         
@@ -90,10 +93,10 @@ class ModelHandler:
                 size_mb = os.path.getsize(path) / 1024 / 1024
                 logger.debug("%s already exists (%.2f MB)", name, size_mb)
             else:
-                logger.info("Downloading %s...", name)
+                logger.info("Downloading custom terminal-trained %s...", name)
                 if not self._download_file(url, path):
                     raise RuntimeError(f"Failed to download {name}")
-                logger.info("%s download complete", name)
+                logger.info("Custom terminal-trained %s download complete", name)
 
     def encode(self, texts: List[str], truncate_to: Optional[int] = MODEL_OUTPUT_DIM) -> np.ndarray:
         """

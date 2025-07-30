@@ -280,7 +280,7 @@ class FuzzyShell:
         
         # Set embedding model version
         if not self.get_metadata('embedding_model'):
-            self.set_metadata('embedding_model', 'all-MiniLM-L6-v2')
+            self.set_metadata('embedding_model', 'minilm-l6-v2-terminal-describer')
         
         # Set initial item count if not exists
         if not self.get_metadata('item_count'):
