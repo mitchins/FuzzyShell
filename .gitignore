@@ -13,3 +13,6 @@ build/
 .pytest_cache/
 mascot_small.png
 .DS_Store
+CLAUDE.md
+fuzzyshell.db-shm
+fuzzyshell.db-wal
