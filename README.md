@@ -5,10 +5,10 @@
     <source srcset="mascot_dark.png" media="(prefers-color-scheme: dark)">
     <img src="mascot_light.png" alt="FuzzyShell Mascot" width="90" height="90">
   </picture>
-  <span style="font-size:1.24em; color:var(--fgColor-muted,#6e7781);">
+  <div style="font-size:1.24em; color:var(--fgColor-muted,#6e7781);">
     Lightning-fast semantic search for your command history.<br>
     Find that command you ran last week with just a few keystrokes.
-  </span>
+  </div>
 </div>
 
 
