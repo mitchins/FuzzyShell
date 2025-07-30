@@ -1,5 +1,9 @@
-![FuzzyShell Mascot](mascot_monogram.png#gh-light-mode-only){:height="50px"}
-![FuzzyShell Mascot](mascot_monogram_dark.png#gh-dark-mode-only){:height="50px"}
+<p align="center">
+  <picture>
+    <source srcset="mascot_monogram_dark.png" media="(prefers-color-scheme: dark)">
+    <img src="mascot_monogram.png" alt="FuzzyShell Mascot" width="64" height="64">
+  </picture>
+</p>
 # FuzzyShell 
 
 Lightning-fast semantic search for your command history. Find that command you ran last week with just a few keystrokes.
