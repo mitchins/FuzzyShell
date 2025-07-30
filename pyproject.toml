@@ -1,0 +1,45 @@
+[project]
+name = "fuzzyshell"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "onnxruntime>=1.15.0",
+    "tokenizers>=0.15.0",
+    "sqlite-vss>=0.1.0",
+    "numpy>=1.20.0",
+    "requests>=2.31.0",
+    "tqdm>=4.66.0",
+    "textual>=0.38.1"
+]
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+fuzzy = "fuzzyshell.fuzzyshell:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-cov"
+]
+
+[tool.coverage.run]
+source = ["fuzzyshell"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "--cov=fuzzyshell --cov-report=term-missing"
