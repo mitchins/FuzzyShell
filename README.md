@@ -1,20 +1,16 @@
-<table>
-  <tr>
-    <td style="vertical-align: middle; padding-right: 16px;">
-      <picture>
-        <source srcset="mascot_monogram_dark_pure_white.png" media="(prefers-color-scheme: dark)">
-        <img src="mascot_monogram_light_pure_black.png" alt="FuzzyShell Mascot" width="80" height="80" style="display: block;">
-      </picture>
-    </td>
-    <td style="vertical-align: middle;">
-      <span style="font-size:2.6em; font-weight:bold; line-height:1.1">FuzzyShell</span><br>
-      <span style="font-size:1.3em; color:var(--fgColor-muted, #6e7781);">
-        Lightning-fast semantic search for your command history.<br>
-        Find that command you ran last week with just a few keystrokes.
-      </span>
-    </td>
-  </tr>
-</table>
+<div style="display: flex; align-items: center; gap: 24px; margin-bottom: 24px;">
+  <picture>
+    <source srcset="mascot_monogram_dark_pure_white.png" media="(prefers-color-scheme: dark)">
+    <img src="mascot_monogram_light_pure_black.png" alt="FuzzyShell Mascot" width="88" height="88" style="display: block;">
+  </picture>
+  <div>
+    <div style="font-size:2.6em; font-weight:bold; line-height:1.1; margin-bottom:0.15em">FuzzyShell</div>
+    <div style="font-size:1.3em; color:var(--fgColor-muted, #6e7781);">
+      Lightning-fast semantic search for your command history.<br>
+      Find that command you ran last week with just a few keystrokes.
+    </div>
+  </div>
+</div>
 
 ## Quick Start
 
