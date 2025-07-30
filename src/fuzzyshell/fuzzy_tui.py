@@ -93,6 +93,7 @@ class StatusFooter(Static):
     item_count = reactive(0)
     embedding_model = reactive("unknown")
     search_time = reactive(0.0)
+    show_scores = reactive(False)
     
     def render(self):
         """Render the combined status footer."""
@@ -119,7 +120,12 @@ class StatusFooter(Static):
         right_text.append("ENTER ", style="bold")
         right_text.append("select ", style="dim")
         right_text.append("TAB ", style="bold")
-        right_text.append("mode", style="dim")
+        right_text.append("mode ", style="dim")
+        right_text.append("^S ", style="bold")
+        if self.show_scores:
+            right_text.append("scores(ON)", style="dim bright_green")
+        else:
+            right_text.append("scores(OFF)", style="dim")
         
         # Create full width text with padding
         full_text = Text()
@@ -241,14 +247,17 @@ class SearchResult(Static):
     
     is_selected = reactive(False)
     
-    def __init__(self, command: str, score: float = 0.0, search_mode: str = "hybrid"):
+    def __init__(self, command: str, score: float = 0.0, search_mode: str = "hybrid", 
+                 semantic_score: float = 0.0, bm25_score: float = 0.0):
         super().__init__()
         self.command = command
         self.score = score
         self.search_mode = search_mode
+        self.semantic_score = semantic_score
+        self.bm25_score = bm25_score
         
     def render(self):
-        """Render the search result with styling."""
+        """Render the search result with styling and optional score."""
         text = Text()
         
         # Add selection indicator
@@ -260,10 +269,52 @@ class SearchResult(Static):
         # Add command text
         text.append(self.command, style="white")
         
+        # Add match score and type if show_scores is enabled (get from parent app)
+        app = self.app
+        if hasattr(app, 'show_scores') and app.show_scores and self.score > 0:
+            # Format score as percentage
+            score_pct = int(self.score * 100)
+            
+            # Determine match type based on which score is higher
+            semantic_pct = int(self.semantic_score * 100)
+            bm25_pct = int(self.bm25_score * 100)
+            
+            # Determine primary match type
+            if bm25_pct > semantic_pct * 1.5:  # BM25 significantly higher
+                match_type = "keyword"
+                match_icon = "🔍"
+                type_color = "green"
+            elif semantic_pct > bm25_pct * 1.5:  # Semantic significantly higher
+                match_type = "semantic"
+                match_icon = "🧠"
+                type_color = "blue"
+            else:  # Both contribute significantly
+                match_type = "hybrid"
+                match_icon = "⚡"
+                type_color = "magenta"
+            
+            # Color code the score based on relevance
+            if score_pct >= 80:
+                score_color = "bright_green"
+            elif score_pct >= 60:
+                score_color = "yellow"
+            elif score_pct >= 40:
+                score_color = "orange1"
+            else:
+                score_color = "red"
+            
+            # Add score and match type with appropriate styling
+            text.append(f" ({score_pct}% ", style=f"dim {score_color}")
+            text.append(f"{match_icon}{match_type}", style=f"dim {type_color}")
+            text.append(")", style=f"dim {score_color}")
+        
         return text
 
 class FuzzyShellApp(App):
     """The main Fuzzy Shell application with modern UI."""
+    
+    # Reactive properties
+    show_scores = reactive(False)
     
     BINDINGS = [
         Binding("escape", "quit", "Quit", show=True),
@@ -273,6 +324,7 @@ class FuzzyShellApp(App):
         Binding("enter", "select_command", "Select", show=True),
         Binding("tab", "cycle_search_mode", "Mode", show=True),
         Binding("ctrl+r", "refresh", "Refresh", show=True),
+        Binding("ctrl+s", "toggle_scores", "Scores", show=True),
     ]
     
     CSS = """
@@ -412,6 +464,22 @@ class FuzzyShellApp(App):
         if search_input.value.strip():
             self._perform_search(search_input.value.strip())
     
+    def action_toggle_scores(self) -> None:
+        """Toggle display of match scores/percentages."""
+        self.show_scores = not self.show_scores
+        
+        # Update status footer to reflect the change
+        footer = self.query_one("#status-footer", StatusFooter)
+        footer.show_scores = self.show_scores
+        
+        # Refresh results display to show/hide scores
+        results_container = self.query_one("#results-container", Container)
+        results_container.remove_children()
+        
+        # Re-display current results with updated score visibility
+        if self.current_results:
+            self._display_results(self.current_results)
+    
     def _show_loading(self, message: str = "Searching...") -> None:
         """Show loading indicator."""
         loading = self.query_one("#loading", LoadingIndicator)
@@ -463,8 +531,16 @@ class FuzzyShellApp(App):
             )
             return
         
-        for i, (cmd, score) in enumerate(results):
-            result_widget = SearchResult(cmd, score, self.search_mode)
+        for i, result_tuple in enumerate(results):
+            # Handle both 2-tuple (legacy) and 4-tuple (detailed scores) formats
+            if len(result_tuple) == 4:
+                cmd, score, semantic_score, bm25_score = result_tuple
+                result_widget = SearchResult(cmd, score, self.search_mode, semantic_score, bm25_score)
+            else:
+                # Legacy format compatibility
+                cmd, score = result_tuple
+                result_widget = SearchResult(cmd, score, self.search_mode)
+                
             if i == 0:  # Select first result
                 result_widget.is_selected = True
                 result_widget.add_class("selected")

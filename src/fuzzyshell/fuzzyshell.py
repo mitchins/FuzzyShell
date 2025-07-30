@@ -953,7 +953,8 @@ class FuzzyShell:
             """Callback function for the UI to perform searches"""
             if not query:
                 return []
-            return self.search(query, return_scores=show_scoring)
+            # Always return detailed scores for the TUI
+            return self.search(query, return_scores=True)
 
         app = FuzzyShellApp(search_callback, fuzzyshell_instance=self)
         selected_command = app.run()
@@ -969,7 +970,8 @@ def interactive_search(show_scoring=False):
         """Callback function for the UI to perform searches"""
         if not query:
             return []
-        return fuzzyshell.search(query, return_scores=show_scoring)
+        # Always return detailed scores for the TUI
+        return fuzzyshell.search(query, return_scores=True)
 
     app = FuzzyShellApp(search_callback, fuzzyshell_instance=fuzzyshell)
     selected_command = app.run()
