@@ -147,16 +147,23 @@ class ModelHandler:
 
 class DescriptionHandler:
     def __init__(self, model_dir: Optional[str] = None):
-        logger.debug("Initializing DescriptionHandler for T5-small")
+        logger.debug("Initializing DescriptionHandler for custom CodeT5-small")
         self.model_dir = model_dir or str(Path.home() / ".fuzzyshell" / "description_model")
         self.use_t5_model = False
         self.encoder_session = None
         self.decoder_session = None
         self.tokenizer = None
         
-        # T5 has separate encoder and decoder models  
-        self.encoder_path = os.path.join(self.model_dir, "encoder_model_quantized.onnx")
-        self.decoder_path = os.path.join(self.model_dir, "decoder_model_quantized.onnx")
+        # CodeT5 has separate encoder and decoder models (using non-quantized versions)
+        self.encoder_path = os.path.join(self.model_dir, "encoder_model.onnx")
+        self.decoder_path = os.path.join(self.model_dir, "decoder_model.onnx")
+        self.decoder_with_past_path = os.path.join(self.model_dir, "decoder_with_past_model.onnx")
+        
+        # CodeT5 uses RoBERTa tokenizer files
+        self.vocab_path = os.path.join(self.model_dir, "vocab.json")
+        self.merges_path = os.path.join(self.model_dir, "merges.txt")
+        self.tokenizer_config_path = os.path.join(self.model_dir, "tokenizer_config.json")
+        self.special_tokens_path = os.path.join(self.model_dir, "special_tokens_map.json")
         
         # Ensure model directory exists
         logger.debug("Using description model directory: %s", self.model_dir)
@@ -174,25 +181,38 @@ class DescriptionHandler:
             options.enable_mem_pattern = False
             
             # Download model and tokenizer if needed
-            logger.debug("Checking T5-small model files")
+            logger.debug("Checking custom CodeT5-small model files")
             self._ensure_model_files()
             
             # Initialize ONNX sessions
-            logger.debug("Loading T5-small encoder ONNX model")
+            logger.debug("Loading custom CodeT5-small encoder ONNX model")
             self.encoder_session = ort.InferenceSession(self.encoder_path, options)
-            logger.debug("Loading T5-small decoder ONNX model") 
+            logger.debug("Loading custom CodeT5-small decoder ONNX model") 
             self.decoder_session = ort.InferenceSession(self.decoder_path, options)
+            logger.debug("Loading custom CodeT5-small decoder with past ONNX model")
+            self.decoder_with_past_session = ort.InferenceSession(self.decoder_with_past_path, options)
             
-            # Initialize tokenizer from Transformers tokenizer files
-            logger.debug("Loading T5-small tokenizer")
-            from transformers import T5TokenizerFast
-            self.tokenizer = T5TokenizerFast.from_pretrained("t5-small")
+            # Initialize RoBERTa tokenizer for CodeT5 (uses RoBERTa tokenizer)
+            logger.debug("Loading custom CodeT5-small tokenizer")
+            from transformers import RobertaTokenizer
+            # Load from the model directory which should have the tokenizer files
+            self.tokenizer = RobertaTokenizer(
+                vocab_file=self.vocab_path,
+                merges_file=self.merges_path,
+                unk_token="<unk>",
+                bos_token="<s>",
+                eos_token="</s>",
+                sep_token="</s>",
+                cls_token="<s>",
+                pad_token="<pad>",
+                mask_token="<mask>"
+            )
             
             self.use_t5_model = True
-            logger.debug("DescriptionHandler T5 model initialization complete")
+            logger.debug("DescriptionHandler custom CodeT5 model initialization complete")
             
         except Exception as e:
-            logger.warning("Failed to initialize T5 model, falling back to rule-based descriptions: %s", str(e))
+            logger.warning("Failed to initialize custom CodeT5 model, falling back to rule-based descriptions: %s", str(e))
             self.use_t5_model = False
             logger.debug("DescriptionHandler fallback initialization complete")
 
@@ -225,31 +245,54 @@ class DescriptionHandler:
             return False
 
     def _ensure_model_files(self):
-        """Download T5-small encoder and decoder models if they don't exist."""
+        """Download custom CodeT5-small encoder, decoder models and tokenizer files if they don't exist."""
+        # Use custom terminal-trained CodeT5 model - non-quantized versions
+        base_url = "https://huggingface.co/Mitchins/codet5-small-terminal-describer-ONNX/resolve/main"
+        
         files_to_download = {
             'encoder': (
                 self.encoder_path,
-                "https://huggingface.co/google-t5/t5-small/resolve/main/onnx/encoder_model_quantized.onnx"
+                f"{base_url}/encoder_model.onnx"
             ),
             'decoder': (
                 self.decoder_path,
-                "https://huggingface.co/google-t5/t5-small/resolve/main/onnx/decoder_model_quantized.onnx"
+                f"{base_url}/decoder_model.onnx"
+            ),
+            'decoder_with_past': (
+                self.decoder_with_past_path,
+                f"{base_url}/decoder_with_past_model.onnx"
+            ),
+            'vocab': (
+                self.vocab_path,
+                f"{base_url}/vocab.json"
+            ),
+            'merges': (
+                self.merges_path,
+                f"{base_url}/merges.txt"
+            ),
+            'tokenizer_config': (
+                self.tokenizer_config_path,
+                f"{base_url}/tokenizer_config.json"
+            ),
+            'special_tokens': (
+                self.special_tokens_path,
+                f"{base_url}/special_tokens_map.json"
             )
         }
         
         for name, (path, url) in files_to_download.items():
             if os.path.exists(path):
                 size_mb = os.path.getsize(path) / 1024 / 1024
-                logger.debug("T5-small %s already exists (%.2f MB)", name, size_mb)
+                logger.debug("Custom CodeT5-small %s already exists (%.2f MB)", name, size_mb)
             else:
-                logger.info("Downloading T5-small %s...", name)
+                logger.info("Downloading custom CodeT5-small %s...", name)
                 if not self._download_file(url, path):
-                    raise RuntimeError(f"Failed to download T5-small {name}")
-                logger.info("T5-small %s download complete", name)
+                    raise RuntimeError(f"Failed to download custom CodeT5-small {name}")
+                logger.info("Custom CodeT5-small %s download complete", name)
 
     def generate_description(self, command: str, max_length: int = 50) -> str:
         """
-        Generate a natural language description for a command using T5-small or fallback.
+        Generate a natural language description for a command using custom CodeT5-small or fallback.
         
         Args:
             command: The command to describe
@@ -264,64 +307,87 @@ class DescriptionHandler:
             return self._generate_with_rules(command)
     
     def _generate_with_t5(self, command: str, max_length: int) -> str:
-        """Generate description using T5 model."""
+        """Generate description using T5 model with proper decoder with past."""
         try:
-            # Tokenize the input command with T5 prefix
-            input_text = f"summarize: {command}"
-            inputs = self.tokenizer(input_text, return_tensors="np", padding=True, truncation=True)
-            
-            # Run encoder
-            encoder_outputs = self.encoder_session.run(
-                None,
-                {
-                    'input_ids': inputs['input_ids'].astype(np.int64),
-                    'attention_mask': inputs['attention_mask'].astype(np.int64)
-                }
-            )
-            
-            # Get encoder hidden states
+            # Add the required prefix for CodeT5
+            input_text = f'describe: {command}'
+            input_ids = self.tokenizer(input_text, return_tensors='np').input_ids
+            attention_mask = np.ones(input_ids.shape, dtype=np.int64)
+
+            # 1. Encode input
+            encoder_outputs = self.encoder_session.run(None, {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask
+            })
             encoder_hidden_states = encoder_outputs[0]
-            
-            # Initialize decoder with start token (T5 uses pad_token_id as decoder start token)
-            start_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
-            decoder_input_ids = np.array([[start_token_id]], dtype=np.int64)
-            
-            # Simple greedy decoding (you might want to implement beam search for better results)
+
+            # 2. Initialize decoder input with pad_token_id
+            decoder_input_ids = np.array([[self.tokenizer.pad_token_id]], dtype=np.int64)
+
             generated_tokens = []
+            past_decoder_key_values = None
+            past_encoder_key_values = None
+
             for _ in range(max_length):
-                decoder_outputs = self.decoder_session.run(
-                    None,
-                    {
-                        'input_ids': decoder_input_ids,
-                        'encoder_hidden_states': encoder_hidden_states
-                    }
-                )
-                
-                # Get next token logits and select most likely token
-                logits = decoder_outputs[0]
-                next_token_id = np.argmax(logits[0, -1, :])
-                
-                # Stop if we hit the end token
-                if next_token_id == self.tokenizer.eos_token_id:
-                    break
+                if past_decoder_key_values is None:
+                    # First step: use decoder_session
+                    decoder_outputs = self.decoder_session.run(None, {
+                        "input_ids": decoder_input_ids,
+                        "encoder_hidden_states": encoder_hidden_states,
+                        "encoder_attention_mask": attention_mask
+                    })
+                    logits = decoder_outputs[0]
                     
-                generated_tokens.append(next_token_id)
-                
-                # Update decoder input for next iteration
-                decoder_input_ids = np.concatenate([
-                    decoder_input_ids,
-                    np.array([[next_token_id]], dtype=np.int64)
-                ], axis=1)
-            
-            # Decode the generated tokens
-            if generated_tokens:
-                description = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-                description = description.strip()
-            else:
-                description = ""
+                    # Collect all present key-value pairs from the first decoder output
+                    past_decoder_key_values = []
+                    past_encoder_key_values = []
+                    for i in range(1, len(decoder_outputs), 4):
+                        past_decoder_key_values.append(decoder_outputs[i])   # present.X.decoder.key
+                        past_decoder_key_values.append(decoder_outputs[i+1]) # present.X.decoder.value
+                        past_encoder_key_values.append(decoder_outputs[i+2]) # present.X.encoder.key
+                        past_encoder_key_values.append(decoder_outputs[i+3]) # present.X.encoder.value
+
+                else:
+                    # Subsequent steps: use decoder_with_past_session
+                    decoder_inputs = {
+                        "input_ids": decoder_input_ids[:, -1:], # Only pass the last generated token
+                        "encoder_attention_mask": attention_mask # Encoder attention mask is constant
+                    }
+                    
+                    # Add past_key_values to decoder_inputs (assuming 6 layers for CodeT5-small)
+                    for i in range(6):
+                        decoder_inputs[f"past_key_values.{i}.decoder.key"] = past_decoder_key_values[i*2]
+                        decoder_inputs[f"past_key_values.{i}.decoder.value"] = past_decoder_key_values[i*2+1]
+                        decoder_inputs[f"past_key_values.{i}.encoder.key"] = past_encoder_key_values[i*2]
+                        decoder_inputs[f"past_key_values.{i}.encoder.value"] = past_encoder_key_values[i*2+1]
+
+                    decoder_outputs = self.decoder_with_past_session.run(None, decoder_inputs)
+                    logits = decoder_outputs[0]
+                    
+                    # Update only the decoder key-value pairs from the output of decoder_with_past_session
+                    new_past_decoder_key_values = []
+                    for i in range(1, len(decoder_outputs), 2): # Iterate in groups of 2 for decoder key/value
+                        new_past_decoder_key_values.append(decoder_outputs[i])   # present.X.decoder.key
+                        new_past_decoder_key_values.append(decoder_outputs[i+1]) # present.X.decoder.value
+                    past_decoder_key_values = new_past_decoder_key_values
+
+                next_token_logits = logits[:, -1, :]
+                next_token = np.argmax(next_token_logits, axis=-1)
+
+                if next_token.item() == self.tokenizer.eos_token_id:
+                    break
+
+                generated_tokens.append(next_token.item())
+                decoder_input_ids = np.concatenate([decoder_input_ids, next_token.reshape(1, 1)], axis=-1)
+
+            description = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            description = description.strip()
             
             # Check if T5 description is good enough, otherwise use rule-based fallback
-            if not description or len(description.strip()) < 5 or description.strip().lower() == command.lower():
+            if (not description or len(description.strip()) < 3 or 
+                description.strip().lower() == command.lower() or
+                len(description.split()) == 1 or
+                self._is_repetitive_description(description)):
                 return self._generate_with_rules(command)
             
             return description
@@ -329,6 +395,29 @@ class DescriptionHandler:
         except Exception as e:
             logger.error("Error generating T5 description for command '%s': %s", command, str(e))
             return self._generate_with_rules(command)
+    
+    def _is_repetitive_description(self, description: str) -> bool:
+        """Check if description contains repetitive patterns that indicate poor generation."""
+        words = description.split()
+        if len(words) < 3:
+            return False
+        
+        # Check for identical consecutive words (more than 2)
+        consecutive_count = 1
+        for i in range(1, len(words)):
+            if words[i] == words[i-1]:
+                consecutive_count += 1
+                if consecutive_count > 2:
+                    return True
+            else:
+                consecutive_count = 1
+        
+        # Check for high repetition ratio
+        unique_words = set(words)
+        if len(unique_words) < len(words) / 3:  # More than 2/3 repetition
+            return True
+            
+        return False
     
     def _generate_with_rules(self, command: str) -> str:
         """Generate description using rule-based patterns."""
