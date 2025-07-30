@@ -49,31 +49,30 @@ fuzzy
 
 ## Features
 
-### 🎯 **Smart Search**
-- **Semantic understanding**: "list files" finds `ls -la`
-- **Exact matching**: "git" prioritizes git commands
-- **Prefix matching**: "doc" finds "docker run", "docker ps"
+### 🎯 Smart Search
+- **Semantic**: "list files" finds `ls -la`.
+- **Exact**: "git" prioritizes git commands.
+- **Prefix**: "doc" finds "docker run", "docker ps".
 
-### ⚡ **Performance**
-- Sub-100ms search on 10k+ commands
-- Intelligent caching and quantized embeddings
-- Background model loading
+### ⚡ Performance
+- Sub-100ms search on 10k+ commands.
+- Fast loading with intelligent caching and quantized embeddings.
 
-### 🔧 **Shell Integration**
-- **Ctrl+F**: Search from anywhere in your terminal
-- **Command population**: Selected commands appear in your prompt
-- **Works like Ctrl+R**: Familiar workflow, better results
+### 🔧 Shell Integration
+- **Ctrl+F**: Search from anywhere.
+- **Command Population**: Selected commands appear in your prompt.
+- **Familiar Workflow**: Works like Ctrl+R, but better.
 
 ## How It Works
 
-FuzzyShell combines two powerful search techniques:
+FuzzyShell uses a hybrid approach for command search:
 
-1. **BM25 (Keyword Search)**: Fast exact matching for precise queries
-2. **Semantic Search**: AI-powered understanding of command meaning
+1.  **Keyword Search (BM25)**: For fast, exact matches.
+2.  **Semantic Search**: AI-powered understanding of command intent.
 
-Commands are indexed with both approaches, then results are ranked using a hybrid scoring system that prioritizes exact matches while understanding context.
+Commands are indexed using both methods, and results are ranked to prioritize exact matches while still understanding context.
 
-**Tech Stack**: Python 3.10+, SQLite with VSS extension, ONNX quantized embeddings
+**Tech Stack**: Python 3.10+, SQLite (with VSS), ONNX quantized embeddings.
 
 ## Development
 
