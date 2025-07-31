@@ -11,6 +11,7 @@ from rich.text import Text
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
 from rich.panel import Panel
+from textual.geometry import Size
 import asyncio
 import threading
 import logging
@@ -414,9 +415,8 @@ class FuzzyShellApp(App):
         loading.id = "loading"
         yield loading
         
-        # Results container with scrolling
-        with ScrollView(id="results-container"):
-            yield Container(id="results-inner")
+        # Results container with scrolling (no inner container)
+        yield ScrollView(id="results-container")
         
         # Description pane
         description_pane = CommandDescriptionPane()
@@ -484,7 +484,7 @@ class FuzzyShellApp(App):
         footer.show_scores = self.show_scores
         
         # Refresh results display to show/hide scores
-        results_container = self.query_one("#results-inner", Container)
+        results_container = self.query_one("#results-container", ScrollView)
         results_container.remove_children()
         
         # Re-display current results with updated score visibility
@@ -533,7 +533,7 @@ class FuzzyShellApp(App):
     
     def _display_results(self, results) -> None:
         """Display search results."""
-        results_container = self.query_one("#results-inner")
+        results_container = self.query_one("#results-container", ScrollView)
         results_container.remove_children()
         
         if not results:
@@ -559,12 +559,30 @@ class FuzzyShellApp(App):
                 description_pane = self.query_one("#description-pane", CommandDescriptionPane)
                 description_pane.generate_description_async(cmd)
             results_container.mount(result_widget)
+
+        # Update ScrollView virtual size based on results
+        scroll_view = self.query_one("#results-container", ScrollView)
+        total_lines = len(results)  # 1 line per SearchResult widget
+        visible_height = scroll_view.size.height
+        # Add extra lines equal to viewport height minus one to eliminate bottom dead zone
+        vs_height = total_lines + visible_height - 1
+        scroll_view.virtual_size = Size(scroll_view.size.width, vs_height)
+        scroll_view._scroll_update(scroll_view.virtual_size)
+
+        # Adjust virtual size post-layout to account for actual content region
+        def adjust_virtual_size():
+            content_height = scroll_view.scrollable_content_region.height
+            visible_height = scroll_view.size.height
+            vs = Size(scroll_view.size.width, content_height + visible_height - 1)
+            scroll_view.virtual_size = vs
+            scroll_view._scroll_update(vs)
+        self.call_after_refresh(adjust_virtual_size)
             
         self.selected_index = 0
     
     def _display_error(self, error_message: str) -> None:
         """Display error message."""
-        results_container = self.query_one("#results-inner")
+        results_container = self.query_one("#results-container", ScrollView)
         results_container.remove_children()
         results_container.mount(
             Static(error_message, classes="error")
@@ -572,7 +590,7 @@ class FuzzyShellApp(App):
     
     def _clear_results(self) -> None:
         """Clear all results."""
-        results_container = self.query_one("#results-inner")
+        results_container = self.query_one("#results-container", ScrollView)
         results_container.remove_children()
         self.current_results = []
         self.selected_index = 0
@@ -620,7 +638,8 @@ class FuzzyShellApp(App):
     
     def _select_result(self, index: int) -> None:
         """Select a result by index with automatic scrolling."""
-        results = self.query_one("#results-inner").children
+        scroll_view = self.query_one("#results-container", ScrollView)
+        results = scroll_view.children
         if not results or not isinstance(results[0], SearchResult):
             return
             
@@ -643,45 +662,36 @@ class FuzzyShellApp(App):
         
         # Auto-scroll to keep selected item visible
         if selected_widget:
-            scroll_view = self.query_one("#results-container", ScrollView)
             # Use call_after_refresh to ensure widget is properly laid out
             self.call_after_refresh(lambda: self._scroll_to_selection(scroll_view, selected_widget, index))
                     
         self.selected_index = index
     
-    def _scroll_to_selection(self, scroll_view: ScrollView, selected_widget, index: int) -> None:
-        """Robust scrolling to keep selection visible with fallback methods."""
-        try:
-            # Primary method: scroll_to_widget
-            success = scroll_view.scroll_to_widget(selected_widget, animate=False, top=False)
-            if success:
-                return
-        except Exception as e:
-            # Fallback: manual scroll calculation
-            pass
-        
-        try:
-            # Fallback method: calculate scroll position manually
-            # Each SearchResult widget is 1 line high
-            line_height = 1
-            scroll_y = index * line_height
-            
-            # Get visible area height (approximate)
-            visible_height = scroll_view.size.height - 2  # Account for margins
-            
-            # Scroll to keep selection in middle third of visible area
-            target_scroll = max(0, scroll_y - visible_height // 3)
-            scroll_view.scroll_to(0, target_scroll, animate=False)
-            
-        except Exception as e:
-            # Last resort: simple scroll down/up based on direction
-            if hasattr(self, '_last_selected_index'):
-                if index > getattr(self, '_last_selected_index', 0):
-                    scroll_view.scroll_down()
-                elif index < getattr(self, '_last_selected_index', 0):
-                    scroll_view.scroll_up()
-            
-            self._last_selected_index = index
+    def _scroll_to_selection(self, scroll_view: ScrollView, selected_widget: Static, index: int) -> None:
+        """Scrolls the view to ensure the selected widget is visible using scroll_to_region."""
+        from textual.geometry import Region
+
+        # Get absolute widget region
+        widget_region = selected_widget.region
+
+        # Get scrollable content region (position of content start)
+        content_region = scroll_view.scrollable_content_region
+
+        # Compute widget region relative to content origin
+        rel_x = widget_region.x - content_region.x
+        rel_y = widget_region.y - content_region.y
+
+        # Build a Region for the widget
+        region = Region(rel_x, rel_y, widget_region.width, widget_region.height)
+
+        # Scroll so that the widget region is visible (explicitly pass top=False)
+        scroll_view.scroll_to_region(
+            region,
+            force=True,
+            animate=False,
+            immediate=True,
+            top=False,
+        )
         
     def action_cursor_up(self) -> None:
         """Move selection up."""
