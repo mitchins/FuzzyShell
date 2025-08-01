@@ -37,13 +37,13 @@ logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
 # Configuration constants for embedding storage
-EMBEDDING_DTYPE = np.float16  # Options: np.int8, np.float16, np.float32
+EMBEDDING_DTYPE = np.float32  # Options: np.int8, np.float16, np.float32 (using FP32 for better precision)
 EMBEDDING_SCALE_FACTOR = 127  # Only used for INT8 quantization
 
 # ANN Search Configuration
 USE_ANN_SEARCH = True  # Enable K-means clustering for approximate nearest neighbor search
 ANN_NUM_CLUSTERS = 32  # Number of clusters for K-means (tune based on dataset size)
-ANN_CLUSTER_CANDIDATES = 3  # Number of closest clusters to search in
+ANN_CLUSTER_CANDIDATES = 6  # Number of closest clusters to search in (optimized for speed)
 
 class ANNSearchIndex:
     """
@@ -144,8 +144,9 @@ class ANNSearchIndex:
         Find candidate embedding indices using ANN search.
         Returns indices of embeddings that are likely to be similar to query.
         """
-        if not self.is_trained:
+        if not self.is_trained or self.cluster_centers is None:
             # Fall back to all indices if not trained
+            logger.warning("ANN index not properly trained, falling back to linear search")
             return list(range(len(self.embeddings))) if self.embeddings is not None else []
             
         # Find closest clusters to query
@@ -157,8 +158,8 @@ class ANNSearchIndex:
         for cluster_id in closest_clusters:
             candidate_indices.extend(self.cluster_indices.get(cluster_id, []))
             
-        logger.debug("ANN search: query mapped to %d clusters, returning %d candidates", 
-                    len(closest_clusters), len(candidate_indices))
+        logger.info("ANN search: query mapped to %d clusters out of %d total, returning %d candidates out of %d total embeddings", 
+                   len(closest_clusters), len(self.cluster_centers), len(candidate_indices), len(self.embeddings))
         return candidate_indices
 
 class FuzzyShell:
@@ -179,6 +180,17 @@ class FuzzyShell:
         
         # ANN search index
         self.ann_index = ANNSearchIndex() if USE_ANN_SEARCH else None
+        if USE_ANN_SEARCH and self.ann_index:
+            # Try to load pre-trained index, rebuild if missing/outdated
+            if not self._load_ann_index():
+                print("🔧 ANN index missing or outdated - rebuilding automatically...")
+                print("⏳ This may take a few seconds for large command histories...")
+                logger.info("ANN index missing or outdated - rebuilding automatically...")
+                self._rebuild_ann_index()
+                print("✅ ANN index rebuild complete")
+                if not self.ann_index.is_trained:
+                    logger.error("Failed to build ANN index during startup")
+                    raise RuntimeError("ANN index build failed. Database may be empty - run --ingest first.")
         
         # Initialize database on startup
         if self._conn is not None:
@@ -343,19 +355,36 @@ class FuzzyShell:
             
         return result
     
-    def _dynamic_hybrid_score(self, semantic_score, bm25_score):
+    def _dynamic_hybrid_score(self, semantic_score, bm25_score, command_text="", query_text=""):
         """
-        Improved hybrid scoring that favors semantic similarity with the better embedding model:
-        - With the improved multilingual model, semantic scores are more reliable
-        - Reduce BM25 dominance to allow better semantic matching
-        - Use adaptive weighting based on semantic confidence
+        Rarity-based hybrid scoring:
+        1. Semantic similarity is primary ranking signal (captures intent)
+        2. BM25 only boosts when query contains genuinely rare terms
+        3. Common terms like 'list', 'file', 'get' don't get BM25 boost
+        4. Rare terms like 'lfs', 'kubectl', specific flags do get boost
         """
-        # Semantic confidence thresholds (adjusted for better model performance)  
-        high_semantic_threshold = 0.4  # Lowered from 0.5 - model is more reliable
-        low_semantic_threshold = 0.2   # Below this, semantic matching is uncertain
+        # Apply phrase proximity penalty to BM25 for multi-word queries
+        if len(query_text.split()) > 1 and len(command_text.split()) > 1:
+            original_bm25 = bm25_score
+            bm25_score = self._apply_phrase_penalty(bm25_score, query_text, command_text)
+            # Debug: Always log for git lfs ls-files to see what's happening
+            if "git lfs ls-files" in command_text and "list" in query_text:
+                logger.info("DEBUG: BM25 penalty for problematic case: '%s' vs '%s': %.3f -> %.3f", 
+                           query_text, command_text, original_bm25, bm25_score)
+            elif abs(bm25_score - original_bm25) > 0.01:  # Log other significant changes
+                logger.info("BM25 phrase penalty: '%s' vs '%s': %.3f -> %.3f", 
+                           query_text, command_text, original_bm25, bm25_score)
+        # Check if query contains rare terms that deserve BM25 boost
+        has_rare_terms = self._query_has_rare_terms(query_text)
         
-        # BM25 significance threshold
-        high_bm25_threshold = 0.6      # Raised to reduce BM25 false positives
+        # If no rare terms, heavily favor semantic similarity
+        if not has_rare_terms:
+            return 0.95 * semantic_score + 0.05 * bm25_score
+        
+        # With rare terms, use adaptive weighting based on semantic confidence
+        high_semantic_threshold = 0.4
+        low_semantic_threshold = 0.2 
+        high_bm25_threshold = 0.6
         
         # Calculate score difference
         score_diff = abs(semantic_score - bm25_score)
@@ -366,8 +395,8 @@ class FuzzyShell:
                 # Both high but very different - balanced but favor semantic
                 return 0.6 * semantic_score + 0.4 * bm25_score
             else:
-                # High semantic confidence - strongly favor semantic (75%)
-                return 0.75 * semantic_score + 0.25 * bm25_score
+                # High semantic confidence - strongly favor semantic (90%)
+                return 0.90 * semantic_score + 0.10 * bm25_score
                 
         elif semantic_score < low_semantic_threshold:
             if bm25_score > high_bm25_threshold:
@@ -377,8 +406,69 @@ class FuzzyShell:
                 # Both low - slight semantic preference for rare term matching
                 return 0.55 * semantic_score + 0.45 * bm25_score
         else:
-            # Medium semantic score - balanced but slightly favor semantic
-            return 0.6 * semantic_score + 0.4 * bm25_score
+            # Medium semantic score - favor semantic more strongly  
+            return 0.8 * semantic_score + 0.2 * bm25_score
+    
+    def _apply_phrase_penalty(self, bm25_score, query_text, command_text):
+        """
+        Apply penalty to BM25 score for poor phrase matching in multi-word queries.
+        Penalizes commands where query words are out of order or far apart.
+        """
+        query_words = query_text.lower().split()
+        command_words = command_text.lower().split()
+        
+        if len(query_words) < 2:
+            return bm25_score
+            
+        # Find positions of query words in command
+        word_positions = {}
+        for i, cmd_word in enumerate(command_words):
+            for query_word in query_words:
+                # Allow partial matches (ls matches list)
+                if query_word in cmd_word or cmd_word in query_word:
+                    if query_word not in word_positions:
+                        word_positions[query_word] = []
+                    word_positions[query_word].append(i)
+        
+        # Calculate phrase penalties
+        penalty_factor = 1.0
+        
+        # Penalty 1: Missing words penalty
+        found_words = len(word_positions)
+        if found_words < len(query_words):
+            missing_ratio = (len(query_words) - found_words) / len(query_words)
+            penalty_factor *= (1.0 - missing_ratio * 0.6)  # Up to 60% penalty for missing words
+        
+        # Penalty 2: Word order penalty  
+        if found_words >= 2:
+            query_pairs = [(query_words[i], query_words[i+1]) for i in range(len(query_words)-1)]
+            order_violations = 0
+            
+            for word1, word2 in query_pairs:
+                if word1 in word_positions and word2 in word_positions:
+                    # Check if any occurrence of word1 comes before word2
+                    found_correct_order = False
+                    for pos1 in word_positions[word1]:
+                        for pos2 in word_positions[word2]:
+                            if pos1 < pos2:
+                                found_correct_order = True
+                                break
+                        if found_correct_order:
+                            break
+                    
+                    if not found_correct_order:
+                        order_violations += 1
+            
+            if order_violations > 0:
+                order_penalty = order_violations / len(query_pairs)
+                penalty_factor *= (1.0 - order_penalty * 0.4)  # Up to 40% penalty for wrong order
+        
+        # Debug logging for phrase penalties
+        if penalty_factor < 0.9:  # Only log when significant penalty applied
+            logger.debug("Phrase penalty: '%s' -> '%s': factor=%.3f (was %.3f, now %.3f)", 
+                        query_text, command_text, penalty_factor, bm25_score, bm25_score * penalty_factor)
+        
+        return bm25_score * penalty_factor
     
     def _kmeans_numpy(self, X, k, max_iters=100, tol=1e-4):
         """
@@ -1052,6 +1142,10 @@ class FuzzyShell:
         history_file = self.get_shell_history_file()
         logger.info("Starting history ingestion from: %s", history_file)
         
+        # Clear all caches when ingesting to ensure fresh results
+        logger.info("Clearing caches due to data ingestion...")
+        self.clear_all_caches()
+        
         # Initialize model if needed and wait for it
         if self._model is None:
             logger.debug("Model not initialized, starting async initialization")
@@ -1125,6 +1219,11 @@ class FuzzyShell:
         # Update last ingestion timestamp
         self.set_metadata('last_updated', time.strftime('%Y-%m-%d %H:%M:%S'))
         
+        # Rebuild ANN index after ingestion
+        if total_processed > 0:
+            logger.info("Rebuilding ANN index after ingestion...")
+            self._rebuild_ann_index()
+        
         total_time = time.time() - start_time
         process_time = time.time() - process_start
         logger.info("Ingestion complete: %d/%d commands processed", total_processed, total_commands)
@@ -1188,6 +1287,134 @@ class FuzzyShell:
             WHERE timestamp < datetime('now', '-' || ? || ' hours')
         """, (max_age_hours,))
         self.conn.commit()
+    
+    def clear_all_caches(self):
+        """Clear all caches to force fresh results"""
+        # Clear query cache
+        c = self.conn.cursor()
+        c.execute("DELETE FROM query_cache")
+        self.conn.commit()
+        logger.info("Cleared query cache")
+        
+        # Clear ANN cluster cache
+        cluster_cache_path = os.path.join(self.db_path.replace('.db', '_clusters.pkl'))
+        if os.path.exists(cluster_cache_path):
+            os.remove(cluster_cache_path)
+            logger.info("Cleared ANN cluster cache")
+            
+        # Clear ANN index cache
+        ann_cache_path = os.path.join(self.db_path.replace('.db', '_ann_index.pkl'))
+        if os.path.exists(ann_cache_path):
+            os.remove(ann_cache_path)
+            logger.info("Cleared ANN index cache")
+            
+        # Reset ANN index to force rebuild
+        if hasattr(self, 'ann_index') and self.ann_index:
+            self.ann_index = ANNSearchIndex()
+            logger.info("Reset ANN index")
+    
+    def _rebuild_ann_index(self):
+        """Rebuild ANN index using all embeddings from database"""
+        if not USE_ANN_SEARCH or not hasattr(self, 'ann_index'):
+            return
+            
+        try:
+            ann_start = time.time()
+            
+            # Load all embeddings from database
+            c = self.conn.cursor()
+            c.execute("SELECT c.id, c.command, e.embedding FROM commands c JOIN embeddings e ON c.id = e.rowid")
+            all_data = c.fetchall()
+            
+            if len(all_data) < ANN_NUM_CLUSTERS:
+                logger.info("Too few commands (%d) for ANN clustering, skipping", len(all_data))
+                return
+                
+            # Extract embeddings
+            embeddings_list = []
+            for _, _, emb in all_data:
+                if EMBEDDING_DTYPE == np.int8:
+                    stored_emb = np.frombuffer(emb, dtype=np.int8)[:384]
+                elif EMBEDDING_DTYPE == np.float16:
+                    stored_emb = np.frombuffer(emb, dtype=np.float16)[:384]
+                elif EMBEDDING_DTYPE == np.float32:
+                    stored_emb = np.frombuffer(emb, dtype=np.float32)[:384]
+                else:
+                    raise ValueError(f"Unsupported EMBEDDING_DTYPE: {EMBEDDING_DTYPE}")
+                
+                embeddings_list.append(self.dequantize_embedding(stored_emb))
+            
+            embeddings = np.vstack(embeddings_list)
+            
+            # Train the index
+            logger.info("Training ANN index with %d embeddings (%d clusters, %d candidates)", 
+                       len(embeddings), ANN_NUM_CLUSTERS, ANN_CLUSTER_CANDIDATES)
+            self.ann_index.fit(embeddings)
+            
+            ann_time = time.time() - ann_start
+            logger.info("ANN index rebuilt in %.3fs", ann_time)
+            
+            # Save the trained index for reuse
+            self._save_ann_index()
+            
+        except Exception as e:
+            logger.error("Failed to rebuild ANN index: %s", str(e))
+            # Reset index on failure
+            self.ann_index = ANNSearchIndex()
+    
+    def _save_ann_index(self):
+        """Save ANN index to disk for reuse"""
+        if not hasattr(self, 'ann_index') or not self.ann_index.is_trained:
+            return
+            
+        try:
+            import pickle
+            ann_cache_path = os.path.join(self.db_path.replace('.db', '_ann_index.pkl'))
+            with open(ann_cache_path, 'wb') as f:
+                pickle.dump({
+                    'cluster_centers': self.ann_index.cluster_centers,
+                    'cluster_indices': self.ann_index.cluster_indices,
+                    'embeddings': self.ann_index.embeddings,
+                    'n_clusters': self.ann_index.n_clusters,
+                    'is_trained': self.ann_index.is_trained
+                }, f)
+            logger.info("ANN index saved to %s", ann_cache_path)
+        except Exception as e:
+            logger.warning("Failed to save ANN index: %s", str(e))
+    
+    def _load_ann_index(self):
+        """Load ANN index from disk"""
+        try:
+            import pickle
+            ann_cache_path = os.path.join(self.db_path.replace('.db', '_ann_index.pkl'))
+            
+            if not os.path.exists(ann_cache_path):
+                return False
+                
+            # Check if cache is newer than database
+            cache_mtime = os.path.getmtime(ann_cache_path)
+            db_mtime = os.path.getmtime(self.db_path)
+            
+            if cache_mtime < db_mtime:
+                logger.info("ANN index cache is outdated (database modified after index). Run --ingest to rebuild.")
+                return False
+                
+            with open(ann_cache_path, 'rb') as f:
+                data = pickle.load(f)
+                
+            # Restore the index
+            self.ann_index.cluster_centers = data['cluster_centers']
+            self.ann_index.cluster_indices = data['cluster_indices'] 
+            self.ann_index.embeddings = data['embeddings']
+            self.ann_index.n_clusters = data['n_clusters']
+            self.ann_index.is_trained = data['is_trained']
+            
+            logger.info("ANN index loaded from cache")
+            return True
+            
+        except Exception as e:
+            logger.warning("Failed to load ANN index: %s", str(e))
+            return False
 
     def get_cached_results(self, query, return_scores=False):
         """Get cached results for a query with specific return_scores setting"""
@@ -1259,7 +1486,7 @@ class FuzzyShell:
             progress_callback: Optional callback function(current, total, stage, partial_results)
         """
         start_time = time.time()
-        logger.debug("Starting search for query: %s (return_scores=%s)", query, return_scores)
+        logger.info("🔍 SEARCH STARTING: query='%s' (return_scores=%s)", query, return_scores)
         
         if not query or query.isspace():
             return []
@@ -1310,16 +1537,14 @@ class FuzzyShell:
             JOIN embeddings v ON c.id = v.rowid
             WHERE c.command LIKE ?
             ORDER BY c.last_used DESC
-            LIMIT 500
         """
         
-        # Get broader set for semantic matching
+        # Get broader set for semantic matching - no limits, search entire dataset
         broader_query = """
             SELECT c.id, c.command, v.embedding
             FROM commands c
             JOIN embeddings v ON c.id = v.rowid
             ORDER BY c.last_used DESC
-            LIMIT 1000
         """
         
         # Try exact matches first
@@ -1333,7 +1558,7 @@ class FuzzyShell:
         else:
             c.execute(broader_query)
             all_commands_data = c.fetchall()
-            logger.debug("Using broader search with %d commands", len(all_commands_data))
+            logger.debug("Using broader search with %d commands (full dataset)", len(all_commands_data))
 
         if not all_commands_data:
             logger.warning("No commands found in database - have you run --ingest?")
@@ -1402,13 +1627,11 @@ class FuzzyShell:
         logger.debug("Loaded %s embeddings with shape %s", 
                     str(EMBEDDING_DTYPE).split('.')[-1], embeddings_array.shape)
         
-        # Train ANN index if enabled and we have enough embeddings
-        if USE_ANN_SEARCH and self.ann_index and len(embeddings_array) >= ANN_NUM_CLUSTERS:
-            if not self.ann_index.is_trained or not np.array_equal(self.ann_index.embeddings, embeddings_array):
-                logger.debug("Training ANN index with %d embeddings", len(embeddings_array))
-                ann_start = time.time()
-                self.ann_index.fit(embeddings_array)
-                logger.debug("ANN training completed in %.3fs", time.time() - ann_start)
+        # Use ANN index (should always be available due to auto-rebuild at startup)
+        use_ann_for_this_search = USE_ANN_SEARCH
+        if USE_ANN_SEARCH and (not self.ann_index or not self.ann_index.is_trained):
+            logger.warning("ANN index unexpectedly unavailable, falling back to linear search")
+            use_ann_for_this_search = False
         
         # Progress callback: Embeddings loaded
         if progress_callback:
@@ -1443,13 +1666,19 @@ class FuzzyShell:
                     embeddings_array.shape, query_embedding.shape)
         
         # Use ANN search to get candidate indices, or all indices for linear search
-        if USE_ANN_SEARCH and self.ann_index and self.ann_index.is_trained:
+        if use_ann_for_this_search and self.ann_index and self.ann_index.is_trained:
             candidate_indices = self.ann_index.search_candidates(query_embedding.flatten())
             # Filter embeddings and commands to only candidates
             if candidate_indices:
-                candidate_embeddings = embeddings_array[candidate_indices]
-                candidate_command_ids = [command_ids[i] for i in candidate_indices]
-                candidate_commands = [commands[i] for i in candidate_indices]
+                # Safety check for index bounds
+                valid_indices = [i for i in candidate_indices if i < len(embeddings_array)]
+                if len(valid_indices) != len(candidate_indices):
+                    logger.warning("ANN returned %d invalid indices, using %d valid ones", 
+                                 len(candidate_indices) - len(valid_indices), len(valid_indices))
+                
+                candidate_embeddings = embeddings_array[valid_indices]
+                candidate_command_ids = [command_ids[i] for i in valid_indices]  
+                candidate_commands = [commands[i] for i in valid_indices]
                 logger.debug("ANN search: using %d/%d candidates for similarity calculation", 
                            len(candidate_indices), len(embeddings_array))
             else:
@@ -1514,10 +1743,17 @@ class FuzzyShell:
             progress_callback(total_records, total_records, "Combining scores...", [])
         
         # Dynamic hybrid scoring: adjust weights based on score strengths
-        combined_scores = np.array([
-            self._dynamic_hybrid_score(sem, bm25) 
-            for sem, bm25 in zip(semantic_scores, bm25_scores)
-        ])
+        combined_scores = []
+        for i, (sem, bm25) in enumerate(zip(semantic_scores, bm25_scores)):
+            hybrid = self._dynamic_hybrid_score(sem, bm25, candidate_commands[i], query)
+            combined_scores.append(hybrid)
+            
+            # Log top scores for debugging
+            if i < 5 or "git lfs ls-files" in candidate_commands[i]:
+                logger.info("Score: '%s' → Sem:%.3f BM25:%.3f Hybrid:%.3f", 
+                           candidate_commands[i][:50], sem, bm25, hybrid)
+        
+        combined_scores = np.array(combined_scores)
         results = []
         for i, (command, combined_score) in enumerate(zip(candidate_commands, combined_scores)):
             if return_scores:
@@ -1796,7 +2032,7 @@ def print_technical_details():
     
     print("=" * 50)
 
-def interactive_search(show_scoring=False):
+def interactive_search(show_scoring=False, show_profiling=False):
     """Launch the interactive search UI"""
     fuzzyshell = FuzzyShell()
     
@@ -1807,6 +2043,9 @@ def interactive_search(show_scoring=False):
         # Always return detailed scores for the TUI
         return fuzzyshell.search(query, return_scores=True)
 
+    if show_profiling:
+        print("🔍 Profiling mode enabled - check logs for detailed timing")
+        
     app = FuzzyShellApp(search_callback, fuzzyshell_instance=fuzzyshell)
     selected_command = app.run()
     return selected_command
@@ -1823,12 +2062,22 @@ def main():
     parser.add_argument('--status', action='store_true', help='Show system status and model information.')
     parser.add_argument('--info', action='store_true', help='Show detailed system information including model details.')
     parser.add_argument('--open-hood', action='store_true', help='Show technical details and internal configuration.')
+    parser.add_argument('--clear-cache', action='store_true', help='Clear all caches and force fresh results.')
+    parser.add_argument('--no-ann', action='store_true', help='Disable ANN search for debugging (uses full linear search).')
+    parser.add_argument('--profile', action='store_true', help='Show detailed timing and performance information.')
 
     args = parser.parse_args()
     
     # Handle technical details
     if args.open_hood:
         print_technical_details()
+        sys.exit(0)
+    
+    # Handle cache clearing (do this before creating FuzzyShell instance)
+    if args.clear_cache:
+        fuzzyshell_temp = FuzzyShell()
+        fuzzyshell_temp.clear_all_caches()
+        print("✅ All caches cleared. Search results will be recalculated from scratch.")
         sys.exit(0)
     
     fuzzyshell = FuzzyShell()
@@ -1843,7 +2092,18 @@ def main():
     elif args.ingest:
         fuzzyshell.ingest_history()
     else:
-        result = interactive_search(show_scoring=args.scoring)
+        # Handle ANN disable flag
+        if args.no_ann:
+            global USE_ANN_SEARCH
+            USE_ANN_SEARCH = False
+            print("🔍 ANN search disabled - using full linear search for debugging")
+            
+        # Handle profiling flag
+        if args.profile:
+            logger.setLevel(logging.INFO)  # Enable more detailed logging
+            print("🔍 Profiling mode enabled - detailed timing will be shown")
+        
+        result = interactive_search(show_scoring=args.scoring, show_profiling=args.profile)
         if result:
             # Print the selected command so it can be captured by the shell wrapper
             print(result)

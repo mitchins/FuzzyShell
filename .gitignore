@@ -17,3 +17,6 @@ CLAUDE.md
 fuzzyshell.db-shm
 fuzzyshell.db-wal
 demo.cast
+fuzzyshell_ann_index.pkl
+test_verification.db-shm
+test_verification.db-wal

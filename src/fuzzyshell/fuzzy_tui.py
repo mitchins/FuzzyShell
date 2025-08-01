@@ -872,8 +872,12 @@ class FuzzyShellApp:
         self._focus_input()
 
     def on_input_changed(self, widget, new_text):
+        # Debug logging for query changes
+        logger.info("🔍 Input changed: '%s' -> '%s'", getattr(self, '_current_query', ''), new_text.strip())
+        
         # Cancel any pending search
         if self._pending_search:
+            logger.debug("Cancelling pending search")
             self.loop.remove_alarm(self._pending_search)
         
         # Cancel any currently running search
@@ -886,10 +890,12 @@ class FuzzyShellApp:
         # Set up new search
         self._current_search_cancelled = False
         self._current_query = new_text.strip()
-        self._pending_search = self.loop.set_alarm_in(0.05, self._perform_search_callback, new_text.strip())
+        logger.info("📅 Scheduling search for: '%s' (150ms delay)", self._current_query)
+        self._pending_search = self.loop.set_alarm_in(0.15, self._perform_search_callback, new_text.strip())  # Increased to 150ms
 
     def _perform_search_callback(self, loop, query):
         """Callback for the alarm - proper urwid callback signature."""
+        logger.info("🚀 Executing debounced search for: '%s'", query)
         self._pending_search = None
         self._perform_search(query)
     
