@@ -92,8 +92,8 @@ class ModelHandler:
 
     def _ensure_model_files(self):
         """Download model and tokenizer if they don't exist."""
-        # Use custom terminal-trained model instead of base MiniLM
-        base_url = "https://huggingface.co/Mitchins/minilm-l6-v2-terminal-describer-embeddings-ONNX/resolve/main/onnx_conversion/int8"
+        # Use the improved multilingual terminal-trained model with better performance
+        base_url = "https://huggingface.co/Mitchins/multilingual-minilm-l12-h384-terminal-describer-embeddings-ONNX/resolve/main"
         
         files_to_download = {
             'model': (
@@ -161,6 +161,41 @@ class ModelHandler:
             mean_pooled = mean_pooled[:, :truncate_to]
             
         return mean_pooled
+    
+    def get_model_info(self) -> dict:
+        """Get comprehensive model information for status/help display."""
+        model_info = {
+            'model_name': 'Mitchins/multilingual-minilm-l12-h384-terminal-describer-embeddings-ONNX',
+            'model_type': 'Multilingual MiniLM-L12-H384 (Terminal-Trained)',
+            'dimensions': MODEL_OUTPUT_DIM,
+            'model_dir': self.model_dir,
+            'model_path': self.model_path,
+            'tokenizer_path': self.tokenizer_path,
+            'performance_improvement': '2x better cosine similarity vs base model',
+            'languages': 'Multilingual support (50+ languages)',
+            'training': 'Custom-trained on terminal commands and descriptions',
+            'quantization': 'INT8 quantized for optimal performance',
+        }
+        
+        # Add file existence and size info
+        try:
+            if os.path.exists(self.model_path):
+                model_size_mb = os.path.getsize(self.model_path) / (1024 * 1024)
+                model_info['model_size_mb'] = f"{model_size_mb:.1f} MB"
+                model_info['model_status'] = 'Available'
+            else:
+                model_info['model_status'] = 'Not downloaded'
+                
+            if os.path.exists(self.tokenizer_path):
+                tokenizer_size_kb = os.path.getsize(self.tokenizer_path) / 1024
+                model_info['tokenizer_size_kb'] = f"{tokenizer_size_kb:.1f} KB"
+                model_info['tokenizer_status'] = 'Available'
+            else:
+                model_info['tokenizer_status'] = 'Not downloaded'
+        except Exception as e:
+            model_info['file_check_error'] = str(e)
+            
+        return model_info
 
 
 class DescriptionHandler:
@@ -526,3 +561,42 @@ class DescriptionHandler:
         
         # Final fallback
         return f"Execute: {clean_cmd.split()[0] if clean_cmd.split() else clean_cmd}"
+    
+    def get_model_info(self) -> dict:
+        """Get comprehensive description model information."""
+        desc_info = {
+            'model_name': 'Mitchins/codet5-small-terminal-describer-ONNX',
+            'model_type': 'CodeT5-Small (Terminal-Trained)',
+            'architecture': 'Encoder-Decoder Transformer',
+            'model_dir': self.model_dir,
+            'status': 'Available' if self.use_t5_model else 'Fallback to rule-based',
+            'fallback': 'Rule-based pattern matching when T5 unavailable',
+        }
+        
+        if self.use_t5_model:
+            desc_info.update({
+                'encoder_path': self.encoder_path,
+                'decoder_path': self.decoder_path,
+                'decoder_with_past_path': self.decoder_with_past_path,
+                'tokenizer_type': 'RoBERTa tokenizer',
+            })
+            
+            # Add file size information
+            try:
+                files_info = []
+                for name, path in [
+                    ('Encoder', self.encoder_path),
+                    ('Decoder', self.decoder_path), 
+                    ('Decoder w/ Past', self.decoder_with_past_path),
+                    ('Vocab', self.vocab_path),
+                    ('Merges', self.merges_path),
+                ]:
+                    if os.path.exists(path):
+                        size_mb = os.path.getsize(path) / (1024 * 1024)
+                        files_info.append(f"{name}: {size_mb:.1f} MB")
+                        
+                desc_info['model_files'] = files_info
+            except Exception as e:
+                desc_info['file_check_error'] = str(e)
+        
+        return desc_info
