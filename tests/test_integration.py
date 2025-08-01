@@ -32,16 +32,19 @@ def test_complete_workflow():
         
         expected = 'python process_tokens.py -c -b "VMA new" "BOQ new" "ME" | jq'
         
-        if cleaned == expected:
+        is_clean = cleaned == expected
+        if is_clean:
             print("✅ Command cleaning works correctly")
         else:
             print(f"❌ Command cleaning failed:")
             print(f"   Expected: {expected}")
             print(f"   Got:      {cleaned}")
-            return False
         
-        # Test search functionality - use a unique search term
-        fs.add_command(cleaned)
+        assert is_clean, f"Command cleaning failed: expected '{expected}', got '{cleaned}'"
+        
+        # Test search functionality - use ingest_history like other tests
+        fs.get_shell_history_file = lambda: temp_history
+        fs.ingest_history()
         # Search for a specific part that should match our cleaned command
         results = fs.search("process_tokens")
         
@@ -56,10 +59,9 @@ def test_complete_workflow():
             print("✅ Search returns clean commands")
         else:
             print(f"❌ Search failed or returned dirty commands: {results}")
-            return False
         
+        assert found_clean_command, f"Search failed or returned dirty commands: {results}"
         print("✅ Complete workflow test passed")
-        return True
         
     finally:
         # Clean up
@@ -96,13 +98,11 @@ def test_shell_output_format():
         
         if all_clean:
             print("✅ All search results are clean and shell-ready")
-            return True
         else:
             print("❌ Some results still contain timestamps")
-            return False
-    else:
-        print("❌ No results from search callback")
-        return False
+        
+        assert results, "No results from search callback"
+        assert all_clean, "Some results still contain timestamps"
 
 if __name__ == "__main__":
     print("🔬 FuzzyShell Integration Test Suite")

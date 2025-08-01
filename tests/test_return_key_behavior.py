@@ -34,13 +34,13 @@ def test_command_selection_flow():
         print(f"✅ Selected command: '{selected_command}'")
         
         # Verify it's clean (no timestamps)
-        if not selected_command.startswith(': ') and ';' not in selected_command[:15]:
+        is_clean = not selected_command.startswith(': ') and ';' not in selected_command[:15]
+        if is_clean:
             print("✅ Command is clean (no timestamps)")
         else:
             print("❌ Command still contains timestamps!")
-            return False
-    
-    return True
+        
+        assert is_clean, "Command still contains timestamps"
 
 def test_app_exit_behavior():
     """Test that the app properly exits and returns commands"""
@@ -73,24 +73,26 @@ def test_app_exit_behavior():
     app = MockApp()
     app.action_select_command()
     
-    if app.exited_with == "python manage.py runserver":
+    correct_exit = app.exited_with == "python manage.py runserver"
+    if correct_exit:
         print("✅ App exits with correct command")
     else:
         print(f"❌ App exited with: {app.exited_with}")
-        return False
+    
+    assert correct_exit, f"App exited with wrong command: {app.exited_with}"
     
     # Test empty results
     app = MockApp()
     app.current_results = []
     app.action_select_command()
     
-    if app.exited_with is None:
+    empty_exit = app.exited_with is None
+    if empty_exit:
         print("✅ App exits cleanly when no results")
     else:
         print(f"❌ App should exit with None, got: {app.exited_with}")
-        return False
     
-    return True
+    assert empty_exit, f"App should exit with None when no results, got: {app.exited_with}"
 
 def test_input_submit_handler():
     """Test that input submit is properly handled"""
@@ -100,14 +102,14 @@ def test_input_submit_handler():
     # but we can verify the handler exists and works
     from fuzzyshell.fuzzy_tui import FuzzyShellApp
     
-    # Check that the method exists
-    if hasattr(FuzzyShellApp, 'on_input_submitted'):
-        print("✅ Input submit handler exists")
+    # Check that the method exists (enter key is handled in unhandled_input)
+    has_handler = hasattr(FuzzyShellApp, 'unhandled_input')
+    if has_handler:
+        print("✅ Input submit handler exists (unhandled_input)")
     else:
         print("❌ Input submit handler missing!")
-        return False
     
-    return True
+    assert has_handler, "Input submit handler missing from FuzzyShellApp"
 
 if __name__ == "__main__":
     print("🔬 Return Key Behavior Test Suite")
