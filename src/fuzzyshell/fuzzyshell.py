@@ -470,6 +470,38 @@ class FuzzyShell:
         
         return bm25_score * penalty_factor
     
+    def _query_has_rare_terms(self, query_text):
+        """
+        Determine if query contains rare/specific terms that deserve BM25 boost.
+        Common shell terms like 'list', 'file', 'get' are not rare.
+        Technical terms like 'lfs', 'kubectl', specific flags are rare.
+        """
+        # Common shell/command terms that shouldn't get BM25 boost
+        common_terms = {
+            'list', 'lists', 'file', 'files', 'get', 'show', 'display', 'view',
+            'open', 'create', 'make', 'new', 'delete', 'remove', 'copy', 'move',
+            'find', 'search', 'run', 'execute', 'start', 'stop', 'install',
+            'update', 'upgrade', 'download', 'upload', 'save', 'load', 'edit',
+            'change', 'modify', 'set', 'config', 'configuration', 'settings',
+            'help', 'info', 'status', 'version', 'test', 'check', 'verify'
+        }
+        
+        query_words = set(word.lower().strip() for word in query_text.split())
+        
+        # Remove common terms
+        rare_words = query_words - common_terms
+        
+        # Also remove single characters and very short words (often noise)
+        rare_words = {word for word in rare_words if len(word) > 2}
+        
+        # If we have any remaining words, they're potentially rare
+        has_rare = bool(rare_words)
+        
+        if has_rare:
+            logger.debug("Rare terms detected in '%s': %s", query_text, rare_words)
+        
+        return has_rare
+    
     def _kmeans_numpy(self, X, k, max_iters=100, tol=1e-4):
         """
         Pure NumPy K-means clustering implementation for coarse-to-fine pruning.
