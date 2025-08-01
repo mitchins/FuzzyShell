@@ -17,11 +17,13 @@ class TestSemanticQuality(unittest.TestCase):
         """Set up test database with problematic cases"""
         self.conn = create_test_db_connection()
         self.fs = FuzzyShell(conn=self.conn)
+        self.fs.init_model_sync()
         
         # Add test commands including the problematic case
         test_commands = [
             "ls -lh",
             "ls -la", 
+            "ls -l", 
             "find . -name '*.txt'",
             "find / -type f -name 'config'",
             "locate myfile.txt",

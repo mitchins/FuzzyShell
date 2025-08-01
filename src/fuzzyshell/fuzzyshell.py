@@ -107,19 +107,36 @@ class FuzzyShell:
             logger.debug("Database connection initialized in %.3fs", time.time() - start_time)
         return self._conn
     
-    def _init_model(self):
-        """Initialize the ONNX model handler"""
+    def init_model_sync(self):
+        """Initialize the ONNX model handler synchronously"""
         start_time = time.time()
-        logger.debug("Starting model initialization")
+        logger.debug("[SYNC] Starting synchronous model initialization")
         try:
+            logger.debug("[SYNC] Creating ModelHandler instance...")
+            handler_start = time.time()
+            
             self._model = ModelHandler()
+            
+            handler_time = time.time() - handler_start
+            logger.debug(f"[SYNC] ModelHandler created in {handler_time:.3f}s")
+            
+            logger.debug("[SYNC] Checking for encode method...")
             if not hasattr(self._model, 'encode'):
                 raise RuntimeError("Model initialized but encode method not found")
-            logger.info("Model initialized successfully in %.3fs", time.time() - start_time)
+                
+            total_time = time.time() - start_time
+            logger.info(f"[SYNC] Model initialized successfully in {total_time:.3f}s")
+            
+            if hasattr(self, '_model_ready'):
+                self._model_ready.set()
             return self._model
+            
         except Exception as e:
-            logger.error("Failed to initialize model: %s", str(e), exc_info=True)
+            total_time = time.time() - start_time
+            logger.error(f"[SYNC] Failed to initialize model after {total_time:.3f}s: %s", str(e), exc_info=True)
             self._model = None
+            if hasattr(self, '_model_ready'):
+                self._model_ready.clear()
             return None
             
     def quantize_embedding(self, embedding, scale_factor=EMBEDDING_SCALE_FACTOR):
@@ -151,18 +168,56 @@ class FuzzyShell:
         """
         Convert stored embedding back to float32 for computation.
         Handles INT8, FP16, and FP32 storage formats.
+        Also ensures dimensional compatibility with current model.
         """
+        # Ensure we have a valid numpy array first
+        if not isinstance(stored_embedding, np.ndarray):
+            stored_embedding = np.array(stored_embedding)
+            
+        # Check for invalid values before casting
+        if len(stored_embedding) == 0:
+            logger.warning("Empty embedding received, returning zeros")
+            return np.zeros(MODEL_OUTPUT_DIM, dtype=np.float32)
+            
         if EMBEDDING_DTYPE == np.int8:
-            # Dequantize INT8 back to float32
-            return stored_embedding.astype(np.float32) / scale_factor
+            # Dequantize INT8 back to float32, with safe casting
+            try:
+                result = stored_embedding.astype(np.float32) / scale_factor
+            except (ValueError, RuntimeWarning) as e:
+                logger.warning(f"Error converting INT8 embedding to float32: {e}")
+                return np.zeros(MODEL_OUTPUT_DIM, dtype=np.float32)
         elif EMBEDDING_DTYPE == np.float16:
-            # Convert FP16 to FP32 for computation
-            return stored_embedding.astype(np.float32)
+            # Convert FP16 to FP32 for computation, with safe casting
+            try:
+                result = stored_embedding.astype(np.float32)
+                # Check for NaN/inf values after conversion
+                if np.any(np.isnan(result)) or np.any(np.isinf(result)):
+                    logger.warning("NaN or inf values detected in FP16 embedding after conversion")
+                    result = np.nan_to_num(result, nan=0.0, posinf=1.0, neginf=-1.0)
+            except (ValueError, RuntimeWarning) as e:
+                logger.warning(f"Error converting FP16 embedding to float32: {e}")
+                return np.zeros(MODEL_OUTPUT_DIM, dtype=np.float32)
         elif EMBEDDING_DTYPE == np.float32:
-            # Already FP32, return as-is
-            return stored_embedding
+            # Already FP32, but check for invalid values
+            result = stored_embedding.copy()
+            if np.any(np.isnan(result)) or np.any(np.isinf(result)):
+                logger.warning("NaN or inf values detected in FP32 embedding")
+                result = np.nan_to_num(result, nan=0.0, posinf=1.0, neginf=-1.0)
         else:
             raise ValueError(f"Unsupported EMBEDDING_DTYPE: {EMBEDDING_DTYPE}")
+            
+        # Ensure embedding matches current model output dimension
+        if len(result) > MODEL_OUTPUT_DIM:
+            logger.debug(f"Truncating stored embedding from {len(result)} to {MODEL_OUTPUT_DIM} dimensions")
+            result = result[:MODEL_OUTPUT_DIM]
+        elif len(result) < MODEL_OUTPUT_DIM:
+            logger.warning(f"Stored embedding has {len(result)} dimensions, expected {MODEL_OUTPUT_DIM}. Padding with zeros.")
+            # Pad with zeros if stored embedding is smaller
+            padded = np.zeros(MODEL_OUTPUT_DIM, dtype=np.float32)
+            padded[:len(result)] = result
+            result = padded
+            
+        return result
     
     def _dynamic_hybrid_score(self, semantic_score, bm25_score):
         """
@@ -172,7 +227,7 @@ class FuzzyShell:
         - Both high/low or similar: use balanced 50/50 weighting
         """
         # Threshold for considering a score "high"
-        high_threshold = 0.6
+        high_threshold = 0.5
         
         # Calculate absolute difference to determine if scores are similar
         score_diff = abs(semantic_score - bm25_score)
@@ -311,7 +366,7 @@ class FuzzyShell:
         def load_model():
             try:
                 logger.debug("Initializing model (loading cached or downloading)")
-                self._init_model()
+                self.init_model_sync()
                 if self._model is None:
                     raise RuntimeError("Model initialization returned None")
                 logger.debug("Model ready and verified")
@@ -402,6 +457,54 @@ class FuzzyShell:
         except Exception as e:
             print(f"Basic search failed: {str(e)}")
             return [("Search error occurred", 0.0)]
+    
+    def _keyword_only_search(self, query, top_k=100, return_scores=False):
+        """Perform BM25-only keyword search when embedding model is unavailable"""
+        logger.debug("Performing keyword-only search for: %s", query)
+        
+        c = self.conn.cursor()
+        # Get all commands for BM25 scoring
+        c.execute("""
+            SELECT id, command FROM commands 
+            ORDER BY last_used DESC
+            LIMIT 2000
+        """)
+        
+        commands_data = c.fetchall()
+        if not commands_data:
+            logger.debug("No commands found in database")
+            return []
+        
+        # Extract commands and compute BM25 scores
+        commands = [row[1] for row in commands_data]
+        logger.debug("Computing BM25 scores for %d commands", len(commands))
+        
+        try:
+            bm25_scores = self.compute_bm25_scores(query, commands)
+            
+            # Create results with scores
+            scored_results = list(zip(commands, bm25_scores))
+            # Sort by BM25 score (descending)
+            scored_results.sort(key=lambda x: x[1], reverse=True)
+            
+            # Filter out zero scores and limit results
+            filtered_results = [(cmd, score) for cmd, score in scored_results if score > 0.0][:top_k]
+            
+            if return_scores:
+                # Return format: (command, combined_score, semantic_score, bm25_score)
+                # Since we only have BM25, semantic_score = 0
+                return [(cmd, score, 0.0, score) for cmd, score in filtered_results]
+            else:
+                return filtered_results
+                
+        except Exception as e:
+            logger.error("Error in keyword-only search: %s", str(e))
+            # Final fallback to basic search
+            basic_results = self.basic_search(query, top_k)
+            if return_scores:
+                return [(cmd, 0.5, 0.0, 0.5) for cmd, score in basic_results]  # Give basic results moderate score
+            else:
+                return basic_results
     
     def is_model_ready(self):
         """Check if model is ready without waiting"""
@@ -978,8 +1081,43 @@ class FuzzyShell:
         """, (query_hash, pickle.dumps(results)))
         self.conn.commit()
 
-    def search(self, query, top_k=100, return_scores=False):
-        """Search for commands using hybrid BM25 + semantic search"""
+    def wait_for_model(self, timeout=10.0):
+        """Wait for the model to be ready - using sync approach since model loads quickly"""
+        logger.debug(f"[WAIT] wait_for_model called")
+        
+        # Check if model is already ready
+        if hasattr(self, '_model') and self._model is not None:
+            logger.debug("[WAIT] Model already loaded")
+            return True
+            
+        # Model loads in ~0.3s, so just do it synchronously
+        logger.debug("[WAIT] Loading model synchronously")
+        try:
+            start_time = time.time()
+            result = self.init_model_sync()
+            load_time = time.time() - start_time
+            
+            if result is not None:
+                logger.info(f"[WAIT] Model loaded successfully in {load_time:.3f}s")
+                return True
+            else:
+                logger.error(f"[WAIT] Model initialization failed after {load_time:.3f}s")
+                return False
+                
+        except Exception as e:
+            logger.error(f"[WAIT] Model initialization exception: {e}")
+            return False
+
+    def search(self, query, top_k=100, return_scores=False, progress_callback=None):
+        """
+        Search for commands using hybrid BM25 + semantic search
+        
+        Args:
+            query: Search query
+            top_k: Maximum number of results to return
+            return_scores: Whether to return detailed scores
+            progress_callback: Optional callback function(current, total, stage, partial_results)
+        """
         start_time = time.time()
         logger.debug("Starting search for query: %s (return_scores=%s)", query, return_scores)
         
@@ -997,10 +1135,14 @@ class FuzzyShell:
         except Exception as e:
             logger.error("Cache lookup failed: %s", str(e))
             
-        # Ensure model is ready
-        model = self.model  # Use property to handle initialization
-        if model is None:
-            return [("Model initialization in progress... Please wait.", 0.0)]
+        # Ensure model is ready - NO FALLBACK, fail fast to expose issues
+        model_ready = self.wait_for_model(timeout=5.0)
+        if not model_ready:
+            error_msg = "❌ SEMANTIC MODEL FAILED TO INITIALIZE - This is the core issue that needs fixing!"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        model = self.model
             
         try:
             # Generate and quantize query embedding
@@ -1015,10 +1157,9 @@ class FuzzyShell:
             logger.debug("Generated query embedding in %.3fs (shape: %s)", 
                         time.time() - embed_start, query_embedding.shape)
         except Exception as e:
-            logger.error("Error generating query embedding: %s", str(e))
-            # Fallback to basic search with score 0.0
-            logger.debug("Falling back to basic search")
-            return [(cmd, 0.0) for cmd in self.basic_search(query, top_k)]
+            error_msg = f"❌ QUERY EMBEDDING GENERATION FAILED: {str(e)} - This needs to be fixed, not hidden!"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
         
         c = self.conn.cursor()
         # Get commands with embeddings, prioritizing exact matches
@@ -1063,41 +1204,89 @@ class FuzzyShell:
         query_terms = self.tokenize(query)
         command_ids, commands, embeddings = zip(*all_commands_data)
         
-        logger.debug("Processing %d commands for ranking (query terms: %s)", len(command_ids), query_terms)
+        total_records = len(command_ids)
+        logger.debug("Processing %d commands for ranking (query terms: %s)", total_records, query_terms)
+        
+        # Progress callback: Starting processing
+        if progress_callback:
+            progress_callback(0, total_records, "Loading embeddings...", [])
         
         # Convert embeddings to numpy array for vectorized operations
         embed_start = time.time()
         
-        # Load embeddings based on configured storage format
+        # Load embeddings based on configured storage format - with progress tracking
+        batch_size = 1000  # Process in batches to show progress for large datasets
+        num_batches = (len(embeddings) + batch_size - 1) // batch_size
         embeddings_list = []
         
-        for emb in embeddings:
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(embeddings))
+            batch_embeddings = embeddings[start_idx:end_idx]
+            
+            # Progress callback for batch processing
+            if progress_callback and len(embeddings) > 500:  # Only show progress for larger datasets
+                progress_callback(end_idx, total_records, f"Loading embeddings batch {batch_idx + 1}/{num_batches}...", [])
+            
             if EMBEDDING_DTYPE == np.int8:
-                # Load INT8 and dequantize
-                stored_emb = np.frombuffer(emb, dtype=np.int8)[:384]
-                embeddings_list.append(self.dequantize_embedding(stored_emb))
+                # Batch process INT8 embeddings
+                raw_batch = np.array([np.frombuffer(emb, dtype=np.int8)[:384] for emb in batch_embeddings])
+                batch_array = raw_batch.astype(np.float32) / EMBEDDING_SCALE_FACTOR
             elif EMBEDDING_DTYPE == np.float16:
-                # Load FP16 and convert to FP32 for computation
-                stored_emb = np.frombuffer(emb, dtype=np.float16)[:384]
-                embeddings_list.append(self.dequantize_embedding(stored_emb))
+                # Batch process FP16 embeddings
+                raw_batch = np.array([np.frombuffer(emb, dtype=np.float16)[:384] for emb in batch_embeddings])
+                batch_array = raw_batch.astype(np.float32)
+                # Clean any NaN/inf values
+                batch_array = np.nan_to_num(batch_array, nan=0.0, posinf=1.0, neginf=-1.0)
             elif EMBEDDING_DTYPE == np.float32:
-                # Load FP32 directly
-                stored_emb = np.frombuffer(emb, dtype=np.float32)[:384]
-                embeddings_list.append(self.dequantize_embedding(stored_emb))
+                # Batch process FP32 embeddings
+                raw_batch = np.array([np.frombuffer(emb, dtype=np.float32)[:384] for emb in batch_embeddings])
+                batch_array = raw_batch.astype(np.float32)
+                # Clean any NaN/inf values
+                batch_array = np.nan_to_num(batch_array, nan=0.0, posinf=1.0, neginf=-1.0)
             else:
                 raise ValueError(f"Unsupported EMBEDDING_DTYPE: {EMBEDDING_DTYPE}")
+            
+            embeddings_list.append(batch_array)
         
-        embeddings_array = np.vstack(embeddings_list)
+        # Combine all batches
+        embeddings_array = np.vstack(embeddings_list) if embeddings_list else np.array([]).reshape(0, MODEL_OUTPUT_DIM)
+        
+        # Ensure all embeddings are exactly 384 dimensions
+        if embeddings_array.shape[1] > MODEL_OUTPUT_DIM:
+            embeddings_array = embeddings_array[:, :MODEL_OUTPUT_DIM]
+        elif embeddings_array.shape[1] < MODEL_OUTPUT_DIM:
+            # Pad with zeros if needed
+            padding = np.zeros((embeddings_array.shape[0], MODEL_OUTPUT_DIM - embeddings_array.shape[1]), dtype=np.float32)
+            embeddings_array = np.hstack([embeddings_array, padding])
         logger.debug("Loaded %s embeddings with shape %s", 
                     str(EMBEDDING_DTYPE).split('.')[-1], embeddings_array.shape)
+        
+        # Progress callback: Embeddings loaded
+        if progress_callback:
+            progress_callback(total_records, total_records, "Processing query embedding...", [])
         
         # First ensure query embedding is the right shape
         logger.debug("Query embedding shape before processing: %s", query_embedding.shape)
         query_embedding = np.array(query_embedding).flatten()[:384]  # Ensure 1D array of right size
         logger.debug("Query embedding shape after flattening and truncating: %s", query_embedding.shape)
         
-        # Query embedding still needs dequantization since it comes from model as INT8
-        query_embedding = self.dequantize_embedding(query_embedding)
+        # Query embedding needs dequantization - optimize for consistency with batch processing
+        if EMBEDDING_DTYPE == np.int8:
+            query_embedding = query_embedding.astype(np.float32) / EMBEDDING_SCALE_FACTOR
+        elif EMBEDDING_DTYPE == np.float16:
+            query_embedding = query_embedding.astype(np.float32)
+            query_embedding = np.nan_to_num(query_embedding, nan=0.0, posinf=1.0, neginf=-1.0)
+        elif EMBEDDING_DTYPE == np.float32:
+            query_embedding = query_embedding.astype(np.float32)
+            query_embedding = np.nan_to_num(query_embedding, nan=0.0, posinf=1.0, neginf=-1.0)
+        
+        # Ensure exactly 384 dimensions
+        if len(query_embedding) < MODEL_OUTPUT_DIM:
+            padded = np.zeros(MODEL_OUTPUT_DIM, dtype=np.float32)
+            padded[:len(query_embedding)] = query_embedding
+            query_embedding = padded
+        
         logger.debug("Query embedding shape after dequantizing: %s", query_embedding.shape)
         
         # Reshape for matrix multiplication
@@ -1112,6 +1301,10 @@ class FuzzyShell:
                     time.time() - embed_start,
                     np.max(semantic_scores) if len(semantic_scores) > 0 else 0.0)
         
+        # Progress callback: Semantic scoring complete
+        if progress_callback:
+            progress_callback(total_records, total_records, "Computing BM25 scores...", [])
+        
         # Avoid division by zero and handle NaN values
         semantic_scores = np.divide(
             semantic_scores, 
@@ -1120,19 +1313,33 @@ class FuzzyShell:
             where=norms != 0
         )
         
+        # Additional NaN/inf cleanup after division
+        semantic_scores = np.nan_to_num(semantic_scores, nan=0.0, posinf=1.0, neginf=0.0)
+        
         # Ensure scores are in [0, 1] range
         semantic_scores = (semantic_scores + 1) / 2  # Convert from [-1, 1] to [0, 1]
         semantic_scores = np.clip(semantic_scores, 0, 1)
+        
+        # Final check for any remaining invalid values
+        semantic_scores = np.nan_to_num(semantic_scores, nan=0.0, posinf=1.0, neginf=0.0)
         
         # Calculate BM25 scores in batch
         bm25_scores = self.calculate_bm25_scores_batch(query_terms, command_ids)
         
         # Normalize BM25 scores
         if len(bm25_scores) > 0:
+            # Clean any NaN/inf values before normalization
+            bm25_scores = np.nan_to_num(bm25_scores, nan=0.0, posinf=1.0, neginf=0.0)
             # Add small epsilon to avoid division by zero
             max_score = np.maximum(bm25_scores.max(), 1e-6)
             bm25_scores = bm25_scores / max_score  # Normalize to [0, 1]
             bm25_scores = np.clip(bm25_scores, 0, 1)
+            # Final cleanup after normalization
+            bm25_scores = np.nan_to_num(bm25_scores, nan=0.0, posinf=1.0, neginf=0.0)
+        
+        # Progress callback: Combining scores
+        if progress_callback:
+            progress_callback(total_records, total_records, "Combining scores...", [])
         
         # Dynamic hybrid scoring: adjust weights based on score strengths
         combined_scores = np.array([
@@ -1166,13 +1373,21 @@ class FuzzyShell:
             
             return score
         
+        # Progress callback: Sorting results
+        if progress_callback:
+            progress_callback(total_records, total_records, "Sorting results...", [])
+        
         results.sort(key=sort_key, reverse=True)
-        results = results[:top_k]
+        final_results = results[:top_k]
+        
+        # Progress callback: Complete with final results
+        if progress_callback:
+            progress_callback(total_records, total_records, "Complete", final_results)
         
         # Log top results with scores for debugging
-        if results:
-            logger.debug("Top %d results:", len(results))
-            for i, result in enumerate(results[:3], 1):  # Log top 3 for debugging
+        if final_results:
+            logger.debug("Top %d results:", len(final_results))
+            for i, result in enumerate(final_results[:3], 1):  # Log top 3 for debugging
                 if return_scores and len(result) == 4:
                     cmd, combined, semantic, bm25 = result
                     logger.debug("  %d. %s (combined: %.3f)", i, cmd, combined)
@@ -1184,13 +1399,13 @@ class FuzzyShell:
             
         # Cache the results
         cache_start = time.time()
-        self.cache_results(query, results, return_scores)
+        self.cache_results(query, final_results, return_scores)
         logger.debug("Results cached in %.3fs", time.time() - cache_start)
         
         total_time = time.time() - start_time
-        logger.info("Total search completed in %.3fs with %d results", total_time, len(results))
+        logger.info("Total search completed in %.3fs with %d results", total_time, len(final_results))
         
-        return results
+        return final_results
     
     def tui(self, show_scoring=False):
         """Launch the interactive TUI for this FuzzyShell instance"""

@@ -41,7 +41,7 @@ def mock_model():
 @pytest.fixture
 def fs_with_model(memory_db, mock_model):
     fs = FuzzyShell(conn=memory_db)
-    fs._init_model()  # Force synchronous initialization
+    fs.init_model_sync()  # Force synchronous initialization
     return fs
 
 def test_semantic_similarity(fs_with_model, mock_model):

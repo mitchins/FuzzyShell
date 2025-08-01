@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 import numpy as np
 from tqdm import tqdm
@@ -15,34 +16,51 @@ MODEL_OUTPUT_DIM = 384  # Base model output dimension
 
 class ModelHandler:
     def __init__(self, model_dir: Optional[str] = None):
-        logger.debug("Initializing ModelHandler")
+        init_start = time.time()
+        logger.debug("[MODEL] Initializing ModelHandler")
+        
+        logger.debug("[MODEL] Setting up paths...")
         self.model_dir = model_dir or str(Path.home() / ".fuzzyshell" / "model")
         self.model_path = os.path.join(self.model_dir, "model_quantized.onnx")
         self.tokenizer_path = os.path.join(self.model_dir, "tokenizer.json")
         
         # Ensure model directory exists
-        logger.debug("Using model directory: %s", self.model_dir)
+        logger.debug(f"[MODEL] Using model directory: {self.model_dir}")
         os.makedirs(self.model_dir, exist_ok=True)
+        logger.debug(f"[MODEL] Directory setup completed in {time.time() - init_start:.3f}s")
         
         # Configure ONNX Runtime session options for optimal performance
-        logger.debug("Configuring ONNX Runtime options")
+        logger.debug("[MODEL] Configuring ONNX Runtime options")
+        options_start = time.time()
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         options.intra_op_num_threads = 1  # Single thread per session for better parallelism
         options.inter_op_num_threads = 1
         options.enable_cpu_mem_arena = False  # Disable memory arena for smaller memory footprint
         options.enable_mem_pattern = False   # Disable memory pattern optimization for faster startup
+        logger.debug(f"[MODEL] ONNX options configured in {time.time() - options_start:.3f}s")
         
         # Download model and tokenizer if needed
-        logger.debug("Checking model files")
+        logger.debug("[MODEL] Checking model files")
+        files_start = time.time()
         self._ensure_model_files()
+        logger.debug(f"[MODEL] Model files checked in {time.time() - files_start:.3f}s")
         
         # Initialize ONNX session and tokenizer
-        logger.debug("Loading ONNX model")
+        logger.debug("[MODEL] Loading ONNX model (THIS IS LIKELY WHERE IT HANGS)")
+        session_start = time.time()
         self.session = ort.InferenceSession(self.model_path, options)
-        logger.debug("Loading tokenizer")
+        session_time = time.time() - session_start
+        logger.debug(f"[MODEL] ONNX session created in {session_time:.3f}s")
+        
+        logger.debug("[MODEL] Loading tokenizer")
+        tokenizer_start = time.time()
         self.tokenizer = Tokenizer.from_file(self.tokenizer_path)
-        logger.debug("ModelHandler initialization complete")
+        tokenizer_time = time.time() - tokenizer_start
+        logger.debug(f"[MODEL] Tokenizer loaded in {tokenizer_time:.3f}s")
+        
+        total_time = time.time() - init_start
+        logger.debug(f"[MODEL] ModelHandler initialization complete in {total_time:.3f}s")
 
     def _download_file(self, url: str, path: str):
         """Download a file with progress bar."""
