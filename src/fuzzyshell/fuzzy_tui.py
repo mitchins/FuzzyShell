@@ -504,6 +504,290 @@ class LoadingIndicator(urwid.Text):
             ]
             self.set_text(text)
 
+class SearchManager:
+    """Handles search operations, progress tracking, and cancellation."""
+    
+    def __init__(self, fuzzyshell_instance, search_callback=None):
+        self.fuzzyshell = fuzzyshell_instance
+        self.search_callback = search_callback
+        self.current_query = None
+        self.search_cancelled = False
+        
+    def execute_search(self, query, ui_controller):
+        """Execute a search with UI updates and progress tracking."""
+        if not query.strip():
+            return []
+        
+        # Validation
+        if self.search_cancelled or query != self.current_query:
+            return []
+        
+        start_time = time.time()
+        self._update_ui_start(query, ui_controller)
+        
+        try:
+            # Create progress callback
+            progress_callback = self._create_progress_callback(query, start_time, ui_controller)
+            
+            # Execute search
+            results = self._perform_search_operation(query, progress_callback)
+            
+            # Process results
+            return self._process_search_results(query, results, start_time, ui_controller)
+            
+        except Exception as e:
+            return self._handle_search_error(e, start_time, ui_controller)
+        finally:
+            self._cleanup_ui(ui_controller)
+    
+    def cancel_search(self):
+        """Cancel the current search operation."""
+        self.search_cancelled = True
+        
+    def set_current_query(self, query):
+        """Set the current query and reset cancellation.""" 
+        self.current_query = query
+        self.search_cancelled = False
+    
+    def _update_ui_start(self, query, ui_controller):
+        """Update UI elements at search start."""
+        if not ui_controller.has_loop():
+            return
+            
+        # Update loading indicator
+        if hasattr(self.fuzzyshell, '_model') and self.fuzzyshell._model is not None:
+            message = f"🔍 Initializing semantic search for '{query}'..."
+        else:
+            message = f"⚠️ Model not ready for '{query}'..."
+        
+        ui_controller.start_loading(message)
+        ui_controller.set_search_status("Searching...")
+    
+    def _create_progress_callback(self, query, start_time, ui_controller):
+        """Create a progress callback function."""
+        def progress_callback(current, total, stage, partial_results):
+            if self.search_cancelled or query != self.current_query:
+                return
+                
+            if not ui_controller.has_loop():
+                return
+                
+            # Calculate progress
+            percent = int((current / total) * 100) if total > 0 else 0
+            elapsed = time.time() - start_time
+            
+            # Update status
+            status_text = f"Searching ({elapsed:.0f}s)" if elapsed > 0.5 else "Searching..."
+            ui_controller.set_search_status(status_text)
+            
+            # Update progress message
+            progress_msg = f"🔍 {stage} ({current:,}/{total:,} records, {percent}%)"
+            ui_controller.update_loading(progress_msg)
+            
+            # Show partial results if complete
+            if (partial_results and len(partial_results) > 0 and 
+                current >= total and stage == "Complete"):
+                if not self.search_cancelled and query == self.current_query:
+                    ui_controller.display_results(partial_results)
+                    logger.debug(f"Progress callback updated results for '{query}' ({len(partial_results)} results)")
+            
+            ui_controller.redraw()
+        
+        return progress_callback
+    
+    def _perform_search_operation(self, query, progress_callback):
+        """Execute the actual search operation."""
+        if hasattr(self.fuzzyshell, 'search'):
+            return self.fuzzyshell.search(query, top_k=100, return_scores=True, progress_callback=progress_callback)
+        else:
+            return self.search_callback(query) if self.search_callback else []
+    
+    def _process_search_results(self, query, results, start_time, ui_controller):
+        """Process and validate search results."""
+        search_time = time.time() - start_time
+        
+        # Validate results
+        if results is None:
+            logger.warning(f"Search callback returned None for query: '{query}'")
+            results = []
+        elif not isinstance(results, (list, tuple)):
+            logger.error(f"Search callback returned invalid type: {type(results)}, expected list/tuple")
+            results = []
+        elif len(results) == 0:
+            logger.debug(f"Search callback returned empty results for query: '{query}'")
+        
+        logger.debug(f"Search for '{query}' returned {len(results)} results in {search_time:.3f}s")
+        
+        # Update UI if search wasn't cancelled
+        if not self.search_cancelled and query == self.current_query:
+            ui_controller.update_footer(search_time=search_time)
+            ui_controller.display_results(results)
+            
+            # Update status
+            if len(results) > 0:
+                ui_controller.set_search_status(f"Found {len(results)}")
+            else:
+                ui_controller.set_search_status("No results")
+        else:
+            logger.debug(f"Search for '{query}' was cancelled, not updating results")
+            
+        return results
+    
+    def _handle_search_error(self, error, start_time, ui_controller):
+        """Handle search errors and update UI appropriately."""
+        search_time = time.time() - start_time
+        logger.error(f"Search error after {search_time:.3f}s: {error}", exc_info=True)
+        
+        ui_controller.update_footer(search_time=search_time)
+        
+        # Create appropriate error message
+        error_msg = f"Search error: {str(error)}"
+        if "timeout" in str(error).lower() or search_time > 25.0:
+            error_msg = f"Model initialization timed out ({search_time:.1f}s). Try again in a moment."
+        elif search_time > 10.0:
+            error_msg = f"Search took {search_time:.1f}s - model may still be loading"
+        
+        ui_controller.show_error(error_msg)
+        return []
+    
+    def _cleanup_ui(self, ui_controller):
+        """Clean up UI elements after search completion."""
+        if ui_controller.has_loop():
+            ui_controller.stop_loading()
+            ui_controller.redraw()
+
+
+class ResultRenderer:
+    """Handles result processing, validation, and display."""
+    
+    def __init__(self):
+        pass
+    
+    def render_results(self, results, ui_controller):
+        """Process and render search results."""
+        ui_controller.clear_results()
+        
+        if not results:
+            ui_controller.show_no_results()
+            return
+        
+        # Process and validate results
+        valid_results = self._process_results(results)
+        
+        if not valid_results:
+            ui_controller.show_no_valid_results()
+            return
+        
+        # Create and display result widgets
+        self._create_result_widgets(valid_results, ui_controller)
+        
+        # Set initial focus and description
+        self._set_initial_focus(ui_controller)
+    
+    def _process_results(self, results):
+        """Process and validate raw search results."""
+        valid_results = []
+        logger.debug(f"Processing {len(results)} raw results")
+        
+        for i, r in enumerate(results):
+            try:
+                logger.debug(f"Processing result {i}: {type(r)} = {r}")
+                
+                # Skip None or empty results
+                if r is None:
+                    logger.warning(f"Skipping None result at index {i}")
+                    continue
+                    
+                if not r:
+                    logger.warning(f"Skipping empty result at index {i}: {r}")
+                    continue
+                    
+                # Ensure r is a sequence
+                if not hasattr(r, '__len__') or not hasattr(r, '__getitem__'):
+                    logger.warning(f"Skipping non-sequence result at index {i}: {type(r)} = {r}")
+                    continue
+                
+                # Extract command and scores
+                processed_result = self._extract_result_data(r, i)
+                if processed_result:
+                    valid_results.append(processed_result)
+                    logger.debug(f"Added valid result: {processed_result[0]} (score: {processed_result[1]})")
+                    
+            except Exception as e:
+                logger.error(f"Unexpected error processing result at index {i}: {e}, result: {r}")
+                continue
+        
+        return valid_results
+    
+    def _extract_result_data(self, result, index):
+        """Extract command and score data from a result."""
+        try:
+            # Handle different result formats
+            if len(result) >= 2:
+                cmd = str(result[0]).strip()
+                if not cmd:
+                    logger.warning(f"Empty command at index {index}")
+                    return None
+                
+                # Extract scores - handle various formats
+                score = result[1] if len(result) > 1 else 0.0
+                sem_score = result[2] if len(result) > 2 else 0.0
+                bm25_score = result[3] if len(result) > 3 else 0.0
+                
+                # Convert scores to float
+                try:
+                    score = float(score)
+                    sem_score = float(sem_score) if isinstance(sem_score, (int, float)) else 0.0
+                    bm25_score = float(bm25_score) if isinstance(bm25_score, (int, float)) else 0.0
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Error converting scores to float at index {index}: {e}")
+                    return None
+                
+                return (cmd, score, sem_score, bm25_score)
+            else:
+                logger.warning(f"Result at index {index} has insufficient data: {len(result)} elements")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error extracting result data at index {index}: {e}")
+            return None
+    
+    def _create_result_widgets(self, valid_results, ui_controller):
+        """Create SearchResult widgets for valid results."""
+        for cmd, score, sem_score, bm25_score in valid_results:
+            widget = SearchResult(
+                cmd, score, ui_controller.get_search_mode(), 
+                sem_score, bm25_score, ui_controller.get_show_scores()
+            )
+            ui_controller.add_result_widget(widget)
+    
+    def _set_initial_focus(self, ui_controller):
+        """Set initial focus and trigger description generation."""
+        if not ui_controller.has_results():
+            return
+            
+        try:
+            # Set focus to first item
+            ui_controller.set_focus(0)
+            
+            # Force visual selection on first item
+            first_widget = ui_controller.get_first_result()
+            if first_widget and hasattr(first_widget, '_create_widget'):
+                first_widget._last_focus_state = None  # Invalidate cached state
+                first_widget._create_widget(focused=True)
+                first_widget._set_w(first_widget._widget)  # Update WidgetWrap
+                logger.debug(f"🔄 Applied initial focus styling to: {getattr(first_widget, 'command', 'unknown')}")
+            
+            # Generate description for first item
+            if first_widget and hasattr(first_widget, 'command'):
+                ui_controller.generate_description(first_widget.command)
+                logger.info(f"🎯 INITIAL DESCRIPTION generated for: '{first_widget.command}'")
+            
+            logger.info(f"🎯 INITIAL FOCUS set to index 0 with description generation")
+        except Exception as e:
+            logger.error(f"Error setting initial focus: {e}")
+
+
 class FuzzyShellApp:
     def __init__(self, search_callback, fuzzyshell_instance=None):
         self.search_callback = search_callback
@@ -516,6 +800,10 @@ class FuzzyShellApp:
         self._current_search_cancelled = False
         self._current_query = None
         self._selected_command = None
+        
+        # Initialize managers
+        self.search_manager = SearchManager(fuzzyshell_instance, search_callback)
+        self.result_renderer = ResultRenderer()
 
         # Create widgets with better styling
         self.input_box = WatermarkEdit(
@@ -606,121 +894,112 @@ class FuzzyShellApp:
         self._perform_search(query)
     
     def _perform_search(self, query):
-        """Perform the actual search operation."""
-        if not query.strip():
-            return
+        """Perform the actual search operation using SearchManager."""
+        # Set current query and perform search
+        self.search_manager.set_current_query(query)
+        self._current_query = query
+        self._current_search_cancelled = False
         
-        # Check if this search was already cancelled before we even started
-        if self._current_search_cancelled or query != self._current_query:
-            return
-            
-        # Show loading indicator (only if loop is available)
-        if hasattr(self, 'loop') and self.loop:
-            # Check if model is likely to be ready
-            if hasattr(self.fuzzyshell, '_model') and self.fuzzyshell._model is not None:
-                message = f"🔍 Initializing semantic search for '{query}'..."
-            else:
-                message = f"⚠️ Model not ready for '{query}'..."
+        # Execute search using SearchManager
+        results = self.search_manager.execute_search(query, self)
+        self.current_results = results
+    
+    # UI Controller Interface methods for SearchManager
+    
+    def has_loop(self):
+        """Check if UI loop is available."""
+        return hasattr(self, 'loop') and self.loop is not None
+    
+    def start_loading(self, message):
+        """Start loading indicator with message."""
+        if self.has_loop():
             self.loading_indicator.start_loading(self.loop, message)
             self.loop.draw_screen()
-            
-        start_time = time.time()
-        
-        # Update search status
-        self.search_status.set_text("Searching...")
-        if hasattr(self, 'loop') and self.loop:
-            self.loop.draw_screen()
-        
-        try:
-            # The progress callback will handle all progress updates now
-            # No more timeout-based messages that override the real progress
-            
-            # Create progress callback for real-time updates
-            def progress_callback(current, total, stage, partial_results):
-                # Check if search was cancelled
-                if self._current_search_cancelled or query != self._current_query:
-                    return  # Don't update UI for cancelled searches
-                
-                if hasattr(self, 'loop') and self.loop:
-                    # Calculate percentage and elapsed time
-                    percent = int((current / total) * 100) if total > 0 else 0
-                    elapsed = time.time() - start_time
-                    
-                    # Update search status with elapsed time if > 0.5s
-                    if elapsed > 0.5:
-                        self.search_status.set_text(f"Searching ({elapsed:.0f}s)")
-                    else:
-                        self.search_status.set_text("Searching...")
-                    
-                    # Update loading message with progress
-                    progress_msg = f"🔍 {stage} ({current:,}/{total:,} records, {percent}%)"
-                    
-                    # Update loading indicator
-                    self.loading_indicator.stop_loading(self.loop)
-                    self.loading_indicator.start_loading(self.loop, progress_msg)
-                    
-                    # Show partial results if available and processing is complete
-                    if partial_results and len(partial_results) > 0 and current >= total and stage == "Complete":
-                        # Only update results when processing is complete and search not cancelled
-                        if not self._current_search_cancelled and query == self._current_query:
-                            self._display_results(partial_results)
-                            logger.debug(f"Progress callback updated results for '{query}' ({len(partial_results)} results)")
-                    
-                    # Force screen update
-                    self.loop.draw_screen()
-            
-            # Call search with progress callback
-            if hasattr(self.fuzzyshell, 'search'):
-                results = self.fuzzyshell.search(query, top_k=100, return_scores=True, progress_callback=progress_callback)
-            else:
-                results = self.search_callback(query)
-            search_time = time.time() - start_time
-            
-            # Validate that results is a list/tuple
-            if results is None:
-                logger.warning(f"Search callback returned None for query: '{query}'")
-                results = []
-            elif not isinstance(results, (list, tuple)):
-                logger.error(f"Search callback returned invalid type: {type(results)}, expected list/tuple")
-                results = []
-            elif len(results) == 0:
-                logger.debug(f"Search callback returned empty results for query: '{query}'")
-            
-            logger.debug(f"Search for '{query}' returned {len(results)} results in {search_time:.3f}s")
-            logger.debug(f"Raw results type: {type(results)}, first few: {results[:3] if results else 'None'}")
-            
-            # Final check: only update results if search wasn't cancelled
-            if not self._current_search_cancelled and query == self._current_query:
-                self.footer.update(search_time=search_time)
-                self.current_results = results
-                self._display_results(results)
-                # Update search status to show completion
-                if len(results) > 0:
-                    self.search_status.set_text(f"Found {len(results)}")
-                else:
-                    self.search_status.set_text("No results")
-            else:
-                logger.debug(f"Search for '{query}' was cancelled, not updating results")
-            
-        except Exception as e:
-            search_time = time.time() - start_time
-            logger.error(f"Search error after {search_time:.3f}s: {e}", exc_info=True)
+    
+    def stop_loading(self):
+        """Stop loading indicator."""
+        if self.has_loop():
+            self.loading_indicator.stop_loading(self.loop)
+    
+    def update_loading(self, message):
+        """Update loading indicator message."""
+        if self.has_loop():
+            self.loading_indicator.stop_loading(self.loop)
+            self.loading_indicator.start_loading(self.loop, message)
+    
+    def set_search_status(self, status):
+        """Update search status text."""
+        self.search_status.set_text(status)
+    
+    def update_footer(self, search_time=None):
+        """Update footer with search time."""
+        if search_time is not None:
             self.footer.update(search_time=search_time)
-            self.results_list.clear()
-            error_msg = f"Search error: {str(e)}"
-            if "timeout" in str(e).lower() or search_time > 25.0:
-                error_msg = f"Model initialization timed out ({search_time:.1f}s). Try again in a moment."
-            elif search_time > 10.0:
-                error_msg = f"Search took {search_time:.1f}s - model may still be loading"
-            self.results_list.append(urwid.Text(error_msg, align='center'))
-            self.current_results = []
-        finally:
-            # Hide loading indicator (only if loop is available)
-            if hasattr(self, 'loop') and self.loop:
-                self.loading_indicator.stop_loading(self.loop)
-        
-        if hasattr(self, 'loop') and self.loop:
+    
+    def display_results(self, results):
+        """Display search results using ResultRenderer."""
+        self.result_renderer.render_results(results, self)
+    
+    def show_error(self, error_msg):
+        """Show error message in results area."""
+        self.results_list.clear()
+        self.results_list.append(urwid.Text(error_msg, align='center'))
+        self.current_results = []
+    
+    def redraw(self):
+        """Force screen redraw."""
+        if self.has_loop():
             self.loop.draw_screen()
+    
+    # Additional UI Controller methods for ResultRenderer
+    
+    def clear_results(self):
+        """Clear the results list."""
+        self.results_list.clear()
+    
+    def show_no_results(self):
+        """Show 'no matches found' message."""
+        self.results_list.append(urwid.Text("No matches found", align='center'))
+        self.description_pane.description = ""
+        self.description_pane.update()
+    
+    def show_no_valid_results(self):
+        """Show 'no valid matches found' message."""
+        self.results_list.append(urwid.Text("No valid matches found", align='center'))
+        self.description_pane.description = ""
+        self.description_pane.update()
+    
+    def get_search_mode(self):
+        """Get current search mode."""
+        return self.search_mode
+    
+    def get_show_scores(self):
+        """Get show scores setting."""
+        return self.show_scores
+    
+    def add_result_widget(self, widget):
+        """Add a result widget to the list."""
+        self.results_list.append(widget)
+    
+    def has_results(self):
+        """Check if results list has items."""
+        return self.results_list and len(self.results_list) > 0
+    
+    def set_focus(self, index):
+        """Set focus to specific result index."""
+        if self.has_results() and 0 <= index < len(self.results_list):
+            self.results_box.set_focus(index)
+    
+    def get_first_result(self):
+        """Get the first result widget."""
+        if self.has_results():
+            return self.results_list[0]
+        return None
+    
+    def generate_description(self, command):
+        """Generate description for a command."""
+        loop = getattr(self, 'loop', None) if hasattr(self, 'loop') else None
+        self.description_pane.generate_description_async(command, loop)
 
     def _display_results(self, results):
         self.results_list.clear()
