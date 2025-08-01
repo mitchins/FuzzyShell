@@ -347,20 +347,7 @@ class SearchResult(urwid.WidgetWrap):
     
     def _create_widget(self, focused=False):
         """Create the underlying widget with proper text content."""
-        try:
-            result = self._build_text_content(focused)
-            if isinstance(result, tuple) and len(result) == 2:
-                left_text, right_text = result
-            else:
-                # Fallback for unexpected return format
-                left_text = [('default', self.command)]
-                right_text = []
-                logger.debug(f"Unexpected _build_text_content result: {result}")
-        except Exception as e:
-            # Defensive fallback
-            left_text = [('default', self.command)]
-            right_text = []
-            logger.debug(f"Error in _build_text_content: {e}")
+        left_text, right_text = self._build_text_content(focused)
         
         # Create a columns layout with command on left, stats on right
         columns = urwid.Columns([
@@ -393,7 +380,7 @@ class SearchResult(urwid.WidgetWrap):
             return False
         
 
-    def _build_text_content(self, focus=False, max_width=None):
+    def _build_text_content(self, focus=False):
         """Build the text content for this search result."""
         # Left side: indicator + command
         left_text = []
@@ -920,7 +907,8 @@ class FuzzyShellApp:
             return
         
         # For all other keys, let the focused widget handle them
-        self.main_layout.keypress((), key)
+        # Use reasonable terminal size estimate
+        self.main_layout.keypress((80, 24), key)
     
     
     def _focus_results(self):
@@ -985,8 +973,6 @@ class FuzzyShellApp:
             ('footer', 'dark gray', 'default'),
             ('reversed', 'default,standout', 'default'),
             
-            # Focus styles - subtle highlighting
-            ('focus_item', 'default', 'dark gray'),
             
             # Input area - minimal styling
             ('input', 'white', 'default'),
