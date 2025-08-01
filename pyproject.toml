@@ -45,3 +45,7 @@ fail_under = 40
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "--cov=fuzzyshell --cov-report=term-missing"
+filterwarnings = [
+    "ignore::DeprecationWarning:urwid.*",
+    "ignore:urwid.*is moved to.*:DeprecationWarning"
+]
