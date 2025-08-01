@@ -854,7 +854,7 @@ class FuzzyShellApp:
             return
         
         # Global shortcuts that work regardless of focus
-        if key in ('q', 'Q', 'escape'):
+        if key in ('q', 'Q', 'esc', 'escape'):
             raise urwid.ExitMainLoop()
         
         elif key == 'enter':

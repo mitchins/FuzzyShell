@@ -60,7 +60,7 @@ def test_modern_functionality():
     print(f"  After 3 cycles: {mock_app.search_mode}")
     
     print("\n✅ Modern Python features working in FuzzyShell!")
-    return True
+    # Test passes if we reach this point without exceptions
 
 if __name__ == "__main__":
     try:

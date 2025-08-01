@@ -79,7 +79,7 @@ def test_command_cleaning_output():
         clean_output = strip_ansi(cleaned)
         print(f"  {i}. {clean_output}")
     
-    return all_clean
+    assert all_clean, "ANSI codes found in output - output is not clean"
 
 def test_search_results_format():
     """Test that search results would be displayed cleanly"""
@@ -99,13 +99,13 @@ def test_search_results_format():
         display_line = f"{prefix}{cmd}"
         
         # Check for ANSI codes
-        if has_ansi_codes(display_line):
+        has_ansi = has_ansi_codes(display_line)
+        if has_ansi:
             print(f"❌ Result {i}: Contains ANSI codes")
-            return False
         else:
             print(f"✅ Result {i}: {display_line}")
-    
-    return True
+        
+        assert not has_ansi, f"Result {i} contains ANSI codes: {display_line}"
 
 if __name__ == "__main__":
     print("🔬 ANSI Clean Output Test (PYTE simulation)")
