@@ -377,9 +377,17 @@ class FuzzyShell:
         # Check if query contains rare terms that deserve BM25 boost
         has_rare_terms = self._query_has_rare_terms(query_text)
         
-        # If no rare terms, heavily favor semantic similarity
+        # Debug rarity detection for problematic cases
+        if "ollama list" in command_text and "list" in query_text:
+            logger.info("🔍 RARITY DEBUG: query='%s', has_rare_terms=%s, bm25=%.3f", query_text, has_rare_terms, bm25_score)
+        
+        # If no rare terms, almost entirely favor semantic similarity
         if not has_rare_terms:
-            return 0.95 * semantic_score + 0.05 * bm25_score
+            result = 0.99 * semantic_score + 0.01 * bm25_score
+            if ("ollama list" in command_text or "ls -lh" in command_text) and "list" in query_text:
+                logger.info("🎯 COMMON TERMS: '%s' vs '%s' → Sem:%.3f BM25:%.3f → Final:%.3f", 
+                           query_text, command_text, semantic_score, bm25_score, result)
+            return result
         
         # With rare terms, use adaptive weighting based on semantic confidence
         high_semantic_threshold = 0.4
@@ -1781,7 +1789,7 @@ class FuzzyShell:
             combined_scores.append(hybrid)
             
             # Log top scores for debugging
-            if i < 5 or "git lfs ls-files" in candidate_commands[i]:
+            if i < 5 or "git lfs ls-files" in candidate_commands[i] or "ollama list" in candidate_commands[i]:
                 logger.info("Score: '%s' → Sem:%.3f BM25:%.3f Hybrid:%.3f", 
                            candidate_commands[i][:50], sem, bm25, hybrid)
         
@@ -1796,20 +1804,18 @@ class FuzzyShell:
             else:
                 results.append((command, float(combined_score)))
 
-        # Sort results with priority for exact prefix matches
+        # Sort results - hybrid scoring already handles relevance, minimal additional boosts
         def sort_key(result):
             command = result[0]
             score = result[1]
             
-            # Boost score significantly if command starts with the query
-            if command.lower().startswith(query.lower()):
-                return score + 10.0  # Large boost for prefix matches
+            # Only boost for exact command matches (not partial word matches)
+            if command.lower() == query.lower():
+                return score + 2.0  # Small boost for exact matches
             
-            # Boost score if any word in command starts with query
-            command_words = command.lower().split()
-            for word in command_words:
-                if word.startswith(query.lower()):
-                    return score + 5.0  # Medium boost for word prefix matches
+            # Very small boost for exact prefix matches only
+            if command.lower().startswith(query.lower()):
+                return score + 0.1  # Minimal boost for prefix matches
             
             return score
         
