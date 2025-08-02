@@ -14,7 +14,8 @@ import pickle
 import hashlib
 from threading import Event
 from .model_handler import ModelHandler, MODEL_OUTPUT_DIM
-from .fuzzy_tui import FuzzyShellApp
+from .model_configs import get_active_model_key, get_model_config
+from .fuzzy_tui import FuzzyShellApp, IngestionProgressTUI
 
 # Configure logging
 # File handler for debug logging
@@ -186,11 +187,30 @@ class FuzzyShell:
                 print("🔧 ANN index missing or outdated - rebuilding automatically...")
                 print("⏳ This may take a few seconds for large command histories...")
                 logger.info("ANN index missing or outdated - rebuilding automatically...")
-                self._rebuild_ann_index()
-                print("✅ ANN index rebuild complete")
-                if not self.ann_index.is_trained:
-                    logger.error("Failed to build ANN index during startup")
-                    raise RuntimeError("ANN index build failed. Database may be empty - run --ingest first.")
+                
+                # Check if database has commands before attempting rebuild
+                if self._conn is not None:
+                    # Ensure database tables exist first
+                    try:
+                        c = self._conn.cursor()
+                        c.execute("SELECT COUNT(*) FROM commands")
+                        command_count = c.fetchone()[0]
+                        if command_count == 0:
+                            logger.info("Database is empty, skipping ANN index build for now")
+                            print("⚠️  Database is empty, ANN index will be built after commands are added")
+                        else:
+                            self._rebuild_ann_index()
+                            print("✅ ANN index rebuild complete")
+                            if not self.ann_index.is_trained:
+                                logger.error("Failed to build ANN index during startup")
+                                raise RuntimeError("ANN index build failed despite having commands.")
+                    except sqlite3.OperationalError:
+                        # Tables don't exist yet, database not initialized
+                        logger.info("Database tables not initialized yet, skipping ANN index build for now")
+                        print("⚠️  Database not initialized, ANN index will be built after setup")
+                else:
+                    # No connection yet, defer ANN building
+                    logger.info("No database connection yet, deferring ANN index build")
         
         # Initialize database on startup
         if self._conn is not None:
@@ -243,11 +263,50 @@ class FuzzyShell:
             logger.debug("Database connection initialized in %.3fs", time.time() - start_time)
         return self._conn
     
+    def create_thread_connection(self):
+        """Create a new database connection for use in background threads."""
+        if self.db_path == ":memory:":
+            # For in-memory databases, we need to share the connection
+            return self._conn
+        
+        # Create new connection for this thread
+        if self.db_path.startswith(":"):
+            connect_string = self.db_path
+        else:
+            connect_string = f"file:{self.db_path}?mode=rwc"
+        
+        conn = sqlite3.connect(
+            connect_string,
+            uri=True,
+            timeout=60.0
+        )
+        
+        # Apply same optimizations
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA cache_size=10000")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        
+        # Try to enable extensions if available
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vss.load(conn)
+        except (AttributeError, Exception) as e:
+            logger.warning("Could not load SQLite extensions on thread connection: %s", str(e))
+        
+        return conn
+    
     def init_model_sync(self):
         """Initialize the ONNX model handler synchronously"""
         start_time = time.time()
         logger.debug("[SYNC] Starting synchronous model initialization")
+        
+        # Create thread-local database connection for model initialization
+        thread_conn = None
         try:
+            logger.debug("[SYNC] Creating thread-local database connection...")
+            thread_conn = self.create_thread_connection()
+            
             logger.debug("[SYNC] Creating ModelHandler instance...")
             handler_start = time.time()
             
@@ -255,6 +314,15 @@ class FuzzyShell:
             
             handler_time = time.time() - handler_start
             logger.debug(f"[SYNC] ModelHandler created in {handler_time:.3f}s")
+            
+            # Check for model changes and handle them using thread connection
+            logger.debug("[SYNC] Checking for model changes...")
+            self._handle_model_change_with_conn(thread_conn)
+            
+            # Store current model metadata if not already stored
+            metadata_model = self._get_metadata_with_conn(thread_conn, 'model_name')
+            if not metadata_model:
+                self._store_model_metadata_with_conn(thread_conn)
             
             logger.debug("[SYNC] Checking for encode method...")
             if not hasattr(self._model, 'encode'):
@@ -270,10 +338,11 @@ class FuzzyShell:
         except Exception as e:
             total_time = time.time() - start_time
             logger.error(f"[SYNC] Failed to initialize model after {total_time:.3f}s: %s", str(e), exc_info=True)
-            self._model = None
-            if hasattr(self, '_model_ready'):
-                self._model_ready.clear()
-            return None
+            raise
+        finally:
+            # Close thread connection if it's not the shared one
+            if thread_conn and thread_conn != self._conn:
+                thread_conn.close()
             
     def quantize_embedding(self, embedding, scale_factor=EMBEDDING_SCALE_FACTOR):
         """
@@ -377,9 +446,9 @@ class FuzzyShell:
         # Check if query contains rare terms that deserve BM25 boost
         has_rare_terms = self._query_has_rare_terms(query_text)
         
-        # Debug rarity detection for problematic cases
-        if "ollama list" in command_text and "list" in query_text:
-            logger.info("🔍 RARITY DEBUG: query='%s', has_rare_terms=%s, bm25=%.3f", query_text, has_rare_terms, bm25_score)
+        # Debug rarity detection for problematic cases (can be removed in production)
+        # if "ollama list" in command_text and "list" in query_text:
+        #     logger.info("🔍 RARITY DEBUG: query='%s', has_rare_terms=%s, bm25=%.3f", query_text, has_rare_terms, bm25_score)
         
         # If no rare terms, almost entirely favor semantic similarity
         if not has_rare_terms:
@@ -817,6 +886,29 @@ class FuzzyShell:
         except Exception as e:
             logger.error("Error setting metadata key '%s': %s", key, str(e))
     
+    def _get_metadata_with_conn(self, conn, key, default=None):
+        """Get a metadata value by key using provided connection."""
+        try:
+            c = conn.cursor()
+            c.execute('SELECT value FROM metadata WHERE key = ?', (key,))
+            result = c.fetchone()
+            return result[0] if result else default
+        except Exception as e:
+            logger.error("Error getting metadata key '%s': %s", key, str(e))
+            return default
+    
+    def _set_metadata_with_conn(self, conn, key, value):
+        """Set a metadata key-value pair using provided connection."""
+        try:
+            c = conn.cursor()
+            c.execute('''
+                INSERT OR REPLACE INTO metadata (key, value, updated_at) 
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+            ''', (key, str(value)))
+            conn.commit()
+        except Exception as e:
+            logger.error("Error setting metadata key '%s': %s", key, str(e))
+    
     def _init_metadata(self):
         """Initialize metadata with default values."""
         # Set schema version for future migrations
@@ -859,6 +951,137 @@ class FuzzyShell:
             logger.debug("Updated item count to %d", count)
         except Exception as e:
             logger.error("Error updating item count: %s", str(e))
+    
+    def store_model_metadata(self, model_key: str = None):
+        """Store current model information in database metadata."""
+        if model_key is None:
+            model_key = get_active_model_key()
+        
+        config = get_model_config(model_key)
+        self.set_metadata('model_name', model_key)
+        self.set_metadata('model_repo', config['repo'])
+        self.set_metadata('model_dimensions', str(config['files']['dimensions']))
+        self.set_metadata('model_tokenizer_type', config['files']['tokenizer_type'])
+        logger.debug(f"Stored model metadata for: {model_key}")
+    
+    def _store_model_metadata_with_conn(self, conn, model_key: str = None):
+        """Store current model information in database metadata using provided connection."""
+        if model_key is None:
+            model_key = get_active_model_key()
+        
+        config = get_model_config(model_key)
+        self._set_metadata_with_conn(conn, 'model_name', model_key)
+        self._set_metadata_with_conn(conn, 'model_repo', config['repo'])
+        self._set_metadata_with_conn(conn, 'model_dimensions', str(config['files']['dimensions']))
+        self._set_metadata_with_conn(conn, 'model_tokenizer_type', config['files']['tokenizer_type'])
+        logger.debug(f"Stored model metadata for: {model_key}")
+    
+    def _handle_model_change_with_conn(self, conn):
+        """Handle model change using provided connection."""
+        current_model = get_active_model_key()
+        stored_model = self._get_metadata_with_conn(conn, 'model_name', 'multilingual-l12')
+        changed = current_model != stored_model
+        
+        if changed:
+            logger.info(f"Model change detected: {stored_model} -> {current_model}")
+            print(f"🔄 Model changed from {stored_model} to {current_model}")
+            print("   Clearing old embeddings - they will be rebuilt with the new model...")
+            
+            # Clear embeddings and related caches using thread connection
+            self._clear_embeddings_with_conn(conn)
+            self._clear_all_caches_with_conn(conn)
+            
+            # Update model metadata
+            self._store_model_metadata_with_conn(conn, current_model)
+            
+            # Reset ANN index count since embeddings changed
+            self._set_metadata_with_conn(conn, 'ann_command_count', '0')
+            self._set_metadata_with_conn(conn, 'poorly_clustered_commands', '0')
+            
+            return True
+        return False
+    
+    def detect_model_change(self) -> tuple[bool, str, str]:
+        """
+        Check if the active model has changed since last run.
+        
+        Returns:
+            tuple: (changed, current_model, stored_model)
+        """
+        current_model = get_active_model_key()
+        stored_model = self.get_metadata('model_name', 'multilingual-l12')  # Default to old model
+        changed = current_model != stored_model
+        
+        if changed:
+            logger.info(f"Model change detected: {stored_model} -> {current_model}")
+        
+        return changed, current_model, stored_model
+    
+    def handle_model_change(self):
+        """Handle model change by clearing embeddings and updating metadata."""
+        changed, current_model, stored_model = self.detect_model_change()
+        
+        if changed:
+            print(f"🔄 Model changed from {stored_model} to {current_model}")
+            print("   Clearing old embeddings - they will be rebuilt with the new model...")
+            
+            # Clear embeddings and related caches
+            self.clear_embeddings()
+            self.clear_all_caches()
+            
+            # Update model metadata
+            self.store_model_metadata(current_model)
+            
+            # Reset ANN index count since embeddings changed
+            self.set_metadata('ann_command_count', '0')
+            self.set_metadata('poorly_clustered_commands', '0')
+            
+            return True
+        return False
+    
+    def clear_embeddings(self):
+        """Clear all embeddings from the database."""
+        try:
+            c = self.conn.cursor()
+            c.execute("DELETE FROM embeddings")
+            self.conn.commit()
+            logger.info("Cleared all embeddings due to model change")
+        except Exception as e:
+            logger.error("Error clearing embeddings: %s", str(e))
+    
+    def _clear_embeddings_with_conn(self, conn):
+        """Clear all embeddings using provided connection."""
+        try:
+            c = conn.cursor()
+            c.execute("DELETE FROM embeddings")
+            conn.commit()
+            logger.info("Cleared all embeddings due to model change")
+        except Exception as e:
+            logger.error("Error clearing embeddings: %s", str(e))
+    
+    def _clear_all_caches_with_conn(self, conn):
+        """Clear all caches using provided connection."""
+        try:
+            # Clear query cache
+            c = conn.cursor()
+            c.execute("DELETE FROM query_cache")
+            conn.commit()
+            logger.info("Cleared query cache")
+            
+            # Clear ANN cluster cache (file-based cache)
+            if not self.db_path.startswith(':'):  # Skip for in-memory DBs
+                cluster_cache_path = os.path.join(self.db_path.replace('.db', '_clusters.pkl'))
+                if os.path.exists(cluster_cache_path):
+                    os.remove(cluster_cache_path)
+                    logger.info("Cleared ANN cluster cache")
+                    
+                # Clear ANN index cache (file-based cache)
+                index_cache_path = os.path.join(self.db_path.replace('.db', '_index.ann'))
+                if os.path.exists(index_cache_path):
+                    os.remove(index_cache_path)
+                    logger.info("Cleared ANN index cache")
+        except Exception as e:
+            logger.error("Error clearing caches: %s", str(e))
     
     def get_database_info(self):
         """Get comprehensive database information for status display."""
@@ -1177,7 +1400,13 @@ class FuzzyShell:
         doc_freq = c.fetchone()[0] or 0
         return math.log((self.total_commands - doc_freq + 0.5) / (doc_freq + 0.5) + 1)
 
-    def ingest_history(self):
+    def ingest_history(self, use_tui=True):
+        """
+        Ingest shell history with optional TUI progress display.
+        
+        Args:
+            use_tui: If True, use TUI progress display. If False or TUI fails, fall back to console.
+        """
         start_time = time.time()
         history_file = self.get_shell_history_file()
         logger.info("Starting history ingestion from: %s", history_file)
@@ -1192,7 +1421,7 @@ class FuzzyShell:
             self._init_model_async()
         
         logger.debug("Waiting for model to be ready...")
-        if not hasattr(self, '_model_ready') or self._model_ready is None or not self._model_ready.wait(timeout=30.0):  # Longer timeout for initial load
+        if not hasattr(self, '_model_ready') or self._model_ready is None or not self._model_ready.wait(timeout=30.0):
             logger.error("Model failed to load in time or initialization failed (timeout after 30s)")
             return
             
@@ -1203,70 +1432,211 @@ class FuzzyShell:
             print(f"History file not found at: {history_file}")
             return
 
+        raw_command_count = len(commands)
+        if raw_command_count == 0:
+            print("No commands to process.")
+            return
+        
         logger.info("Starting command processing...")
-        total_processed = 0
-        total_commands = len(commands)
         c = self.conn.cursor()
         process_start = time.time()
         
+        # Filter and clean commands first, maintaining set for deduplication
+        print(f"Cleaning {raw_command_count} raw commands...")
+        clean_commands = set()
         for raw_command in commands:
             if not raw_command or raw_command.isspace():
                 continue
-            
-            # Clean the command to remove shell history format
             command = self.clean_shell_command(raw_command)
-            if not command or command.isspace():
-                continue
+            if command and not command.isspace():
+                clean_commands.add(command)  # Use set to maintain deduplication
+        
+        if not clean_commands:
+            print("No valid commands found after cleaning.")
+            return
+        
+        # Convert to list for batch processing (already deduplicated by set)
+        new_commands = list(clean_commands)
+        final_command_count = len(new_commands)
+        
+        print(f"After cleaning and deduplication: {final_command_count} unique commands to process")
+        
+        # Now initialize TUI with the correct final count
+        tui_progress = None
+        console_fallback = False
+        
+        if use_tui:
+            try:
+                tui_progress = IngestionProgressTUI()
+                tui_progress.set_total_commands(final_command_count)
                 
-            # Check if command already exists
-            c.execute("SELECT id FROM commands WHERE command = ?", (command,))
-            if c.fetchone() is None:
-                # Process terms for BM25
-                terms = self.tokenize(command)
-                term_freq = Counter(terms)
+                # Start TUI in a separate thread to avoid blocking
+                def run_tui():
+                    try:
+                        loop = tui_progress.start()
+                        loop.run()
+                    except Exception as e:
+                        logger.debug(f"TUI loop ended: {e}")
                 
-                # Insert command and get its id
-                c.execute("INSERT INTO commands (command, length) VALUES (?, ?)", 
-                         (command, len(terms)))
-                command_id = c.lastrowid
+                tui_thread = threading.Thread(target=run_tui, daemon=True)
+                tui_thread.start()
                 
-                # Insert term frequencies
-                for term, freq in term_freq.items():
-                    c.execute("""
-                        INSERT INTO term_frequencies (term, command_id, freq)
-                        VALUES (?, ?, ?)
-                    """, (term, command_id, freq))
+                # Give TUI a moment to initialize
+                time.sleep(0.1)
                 
-                # Generate and insert embedding
-                # Get embedding and ensure it's the right size
-                embedding = self.model.encode([command])[0]  # Get first element as we're encoding a single command
-                if len(embedding) > MODEL_OUTPUT_DIM:
-                    embedding = embedding[:MODEL_OUTPUT_DIM]
-                embedding = self.quantize_embedding(embedding)  # Quantize before storage
-                c.execute("INSERT INTO embeddings (rowid, embedding) VALUES (?, ?)", 
-                         (command_id, embedding.tobytes()))
+                # Update initial status
+                tui_progress.update_progress(0, "Starting batch processing...", "Initialization")
                 
-                total_processed += 1
-                if total_processed % 100 == 0:
-                    print(f"Processed {total_processed} commands...")
+            except Exception as e:
+                logger.warning(f"Failed to initialize TUI progress: {e}. Falling back to console.")
+                console_fallback = True
+                tui_progress = None
+        else:
+            console_fallback = True
+        
+        # If using console fallback, show simple message
+        if console_fallback:
+            print(f"Processing {final_command_count} commands...")
+        
+        # Enable SQLite fast mode for bulk ingestion
+        c = self.conn.cursor()
+        
+        # Store original settings
+        original_synchronous = c.execute("PRAGMA synchronous").fetchone()[0]
+        original_journal_mode = c.execute("PRAGMA journal_mode").fetchone()[0]
+        
+        try:
+            # Fast mode optimizations for bulk insert
+            c.execute("PRAGMA synchronous = OFF")        # Don't wait for disk writes
+            c.execute("PRAGMA journal_mode = MEMORY")    # Keep journal in memory
+            c.execute("PRAGMA cache_size = -64000")      # 64MB cache
+            c.execute("PRAGMA temp_store = MEMORY")      # Temp tables in memory
+            logger.debug("Enabled SQLite fast mode for bulk ingestion")
+        except Exception as e:
+            logger.warning(f"Could not enable fast mode: {e}")
+        
+        total_processed = 0
+        
+        if tui_progress:
+            try:
+                tui_progress.update_progress(10, f"Processing {final_command_count} unique commands", "Command Processing")
+            except:
+                pass
+        
+        # DEFERRED APPROACH: Generate all embeddings first, then do database operations
+        if console_fallback:
+            print("Generating embeddings for all commands...")
+        
+        # Generate embeddings in batches but store them in memory
+        BATCH_SIZE = 1  # Optimal batch size for best performance (256+ commands/sec)
+        all_embeddings = []
+        all_command_data = []
+        
+        for batch_start in range(0, final_command_count, BATCH_SIZE):
+            batch_commands = new_commands[batch_start:batch_start + BATCH_SIZE]
+            
+            if tui_progress:
+                try:
+                    commands_processed = min(batch_start + BATCH_SIZE, final_command_count)
+                    total_batches = (final_command_count + BATCH_SIZE - 1) // BATCH_SIZE
+                    current_batch = batch_start // BATCH_SIZE + 1
+                    tui_progress.update_progress(
+                        20 + int((batch_start / final_command_count) * 60),
+                        f"Processing {commands_processed}/{final_command_count} commands (batch {current_batch}/{total_batches})",
+                        "Embedding Generation"
+                    )
+                except:
+                    pass
+            
+            # Generate embeddings (the fast part)
+            batch_embeddings = self.model.encode(batch_commands)
+            all_embeddings.extend(batch_embeddings)
+            
+            # Prepare command data (no database operations yet)
+            for command in batch_commands:
+                all_command_data.append((command, len(command.split())))
+        
+        # Now do ALL database operations in one go
+        if console_fallback:
+            print("Saving all data to database...")
+        if tui_progress:
+            try:
+                tui_progress.update_progress(80, "Saving to database...", "Database Operations")
+            except:
+                pass
+        
+        # Single bulk insert for all commands
+        c.executemany("INSERT OR IGNORE INTO commands (command, length) VALUES (?, ?)", all_command_data)
+        
+        # Get all the command IDs at once
+        last_id = c.execute("SELECT MAX(id) FROM commands").fetchone()[0]
+        first_id = last_id - final_command_count + 1
+        
+        # Prepare all embedding data at once
+        embedding_data = []
+        for i, embedding in enumerate(all_embeddings):
+            command_id = first_id + i
+            if len(embedding) > MODEL_OUTPUT_DIM:
+                embedding = embedding[:MODEL_OUTPUT_DIM]
+            quantized_embedding = self.quantize_embedding(embedding)
+            embedding_data.append((command_id, quantized_embedding.tobytes()))
+        
+        # Single bulk insert for all embeddings
+        c.executemany("INSERT OR REPLACE INTO embeddings (rowid, embedding) VALUES (?, ?)", embedding_data)
+        
+        total_processed = final_command_count
+        
+        if tui_progress:
+            tui_progress.processed_commands = total_processed
         
         self.conn.commit()
         self.update_corpus_stats()
         
-        # Update accurate item count in metadata
+        # Update metadata
         self._update_item_count()
-        
-        # Update last ingestion timestamp
         self.set_metadata('last_updated', time.strftime('%Y-%m-%d %H:%M:%S'))
         
-        # Rebuild ANN index after ingestion
+        # Rebuild ANN index (67-100%)
         if total_processed > 0:
+            if tui_progress:
+                try:
+                    tui_progress.update_progress(67, "Building search index...", "ANN Indexing")
+                except:
+                    pass
+            elif console_fallback:
+                print("Building search index...")
+                
             logger.info("Rebuilding ANN index after ingestion...")
-            self._rebuild_ann_index()
+            self._rebuild_ann_index_with_tui_progress(tui_progress, console_fallback)
+        else:
+            if tui_progress:
+                try:
+                    tui_progress.update_progress(100, "No new commands to index", "Complete")
+                except:
+                    pass
+        
+        # Finish progress display
+        if tui_progress:
+            try:
+                tui_progress.finish("Ingestion complete!")
+            except:
+                pass
+        elif console_fallback:
+            print(f"✅ Ingestion complete! {total_processed} commands processed.")
+        
+        # Restore original SQLite settings
+        try:
+            c.execute(f"PRAGMA synchronous = {original_synchronous}")
+            c.execute(f"PRAGMA journal_mode = {original_journal_mode}")
+            c.execute("PRAGMA cache_size = -2000")  # Reset to default
+            self.conn.commit()  # Final commit with restored settings
+            logger.debug("Restored SQLite settings after bulk ingestion")
+        except Exception as e:
+            logger.warning(f"Could not restore SQLite settings: {e}")
         
         total_time = time.time() - start_time
         process_time = time.time() - process_start
-        logger.info("Ingestion complete: %d/%d commands processed", total_processed, total_commands)
+        logger.info("Ingestion complete: %d/%d commands processed", total_processed, final_command_count)
         logger.info("Total ingestion time: %.3fs (%.3fs/command)", 
                    total_time, total_time/total_processed if total_processed > 0 else 0)
         logger.debug("Pure processing time: %.3fs (%.3fs/command)", 
@@ -1394,12 +1764,179 @@ class FuzzyShell:
             ann_time = time.time() - ann_start
             logger.info("ANN index rebuilt in %.3fs", ann_time)
             
-            # Save the trained index for reuse
-            self._save_ann_index()
+        except Exception as e:
+            logger.error("Error rebuilding ANN index: %s", e)
+            
+    def _rebuild_ann_index_with_progress(self, progress):
+        """Rebuild ANN index with progress updates (67-100%)"""
+        if not USE_ANN_SEARCH or not hasattr(self, 'ann_index'):
+            progress.update(100, "ANN indexing skipped")
+            return
+            
+        try:
+            ann_start = time.time()
+            
+            # Load all embeddings from database (67-75%)
+            progress.update(67, "Loading embeddings...")
+            c = self.conn.cursor()
+            c.execute("SELECT c.id, c.command, e.embedding FROM commands c JOIN embeddings e ON c.id = e.rowid")
+            all_data = c.fetchall()
+            
+            if len(all_data) < ANN_NUM_CLUSTERS:
+                logger.info("Too few commands (%d) for ANN clustering, skipping", len(all_data))
+                progress.update(100, f"Too few commands ({len(all_data)}) for clustering")
+                return
+                
+            progress.update(75, "Preparing embeddings...")
+            
+            # Extract embeddings (75-85%)
+            embeddings_list = []
+            for i, (_, _, emb) in enumerate(all_data):
+                if EMBEDDING_DTYPE == np.int8:
+                    stored_emb = np.frombuffer(emb, dtype=np.int8)[:384]
+                elif EMBEDDING_DTYPE == np.float16:
+                    stored_emb = np.frombuffer(emb, dtype=np.float16)[:384]
+                elif EMBEDDING_DTYPE == np.float32:
+                    stored_emb = np.frombuffer(emb, dtype=np.float32)[:384]
+                else:
+                    raise ValueError(f"Unsupported EMBEDDING_DTYPE: {EMBEDDING_DTYPE}")
+                
+                embeddings_list.append(self.dequantize_embedding(stored_emb))
+                
+                # Update progress occasionally
+                if i % max(1, len(all_data) // 10) == 0:
+                    current_progress = 75 + int((i / len(all_data)) * 10)
+                    progress.update(current_progress, f"Processing embeddings... ({i+1}/{len(all_data)})")
+            
+            embeddings = np.vstack(embeddings_list)
+            
+            # Train the index (85-100%)
+            progress.update(85, f"Training ANN index ({ANN_NUM_CLUSTERS} clusters)...")
+            logger.info("Training ANN index with %d embeddings (%d clusters, %d candidates)", 
+                       len(embeddings), ANN_NUM_CLUSTERS, ANN_CLUSTER_CANDIDATES)
+            self.ann_index.fit(embeddings)
+            
+            ann_time = time.time() - ann_start
+            progress.update(100, f"ANN index complete! ({ann_time:.1f}s)")
+            logger.info("ANN index rebuilt in %.3fs", ann_time)
             
         except Exception as e:
-            logger.error("Failed to rebuild ANN index: %s", str(e))
-            # Reset index on failure
+            logger.error("Error rebuilding ANN index: %s", e)
+            progress.update(100, f"ANN indexing failed: {e}")
+            
+    def _rebuild_ann_index_with_tui_progress(self, tui_progress, console_fallback):
+        """Rebuild ANN index with TUI progress updates (67-100%)"""
+        if not USE_ANN_SEARCH or not hasattr(self, 'ann_index'):
+            if tui_progress:
+                try:
+                    tui_progress.update_progress(100, "ANN indexing skipped")
+                except:
+                    pass
+            elif console_fallback:
+                print("  Search indexing skipped")
+            return
+            
+        try:
+            ann_start = time.time()
+            
+            # Load all embeddings from database (67-75%)
+            if tui_progress:
+                try:
+                    tui_progress.update_progress(67, "Loading embeddings...", "ANN Indexing")
+                except:
+                    pass
+            elif console_fallback:
+                print("  Loading embeddings...")
+                
+            c = self.conn.cursor()
+            c.execute("SELECT c.id, c.command, e.embedding FROM commands c JOIN embeddings e ON c.id = e.rowid")
+            all_data = c.fetchall()
+            
+            if len(all_data) < ANN_NUM_CLUSTERS:
+                message = f"Too few commands ({len(all_data)}) for clustering"
+                logger.info(message)
+                if tui_progress:
+                    try:
+                        tui_progress.update_progress(100, message, "Complete")
+                    except:
+                        pass
+                elif console_fallback:
+                    print(f"  {message}")
+                return
+                
+            if tui_progress:
+                try:
+                    tui_progress.update_progress(75, "Preparing embeddings...", "ANN Indexing")
+                except:
+                    pass
+            elif console_fallback:
+                print("  Preparing embeddings...")
+            
+            # Extract embeddings (75-85%)
+            embeddings_list = []
+            for i, (_, _, emb) in enumerate(all_data):
+                if EMBEDDING_DTYPE == np.int8:
+                    stored_emb = np.frombuffer(emb, dtype=np.int8)[:384]
+                elif EMBEDDING_DTYPE == np.float16:
+                    stored_emb = np.frombuffer(emb, dtype=np.float16)[:384]
+                elif EMBEDDING_DTYPE == np.float32:
+                    stored_emb = np.frombuffer(emb, dtype=np.float32)[:384]
+                else:
+                    raise ValueError(f"Unsupported EMBEDDING_DTYPE: {EMBEDDING_DTYPE}")
+                
+                embeddings_list.append(self.dequantize_embedding(stored_emb))
+                
+                # Update progress occasionally
+                if tui_progress and i % max(1, len(all_data) // 10) == 0:
+                    try:
+                        current_progress = 75 + int((i / len(all_data)) * 10)
+                        tui_progress.update_progress(
+                            current_progress, 
+                            f"Processing embeddings... ({i+1}/{len(all_data)})",
+                            "ANN Indexing"
+                        )
+                    except:
+                        pass
+            
+            embeddings = np.vstack(embeddings_list)
+            
+            # Train the index (85-100%)
+            if tui_progress:
+                try:
+                    tui_progress.update_progress(85, f"Training search index ({ANN_NUM_CLUSTERS} clusters)...", "ANN Indexing")
+                except:
+                    pass
+            elif console_fallback:
+                print(f"  Training search index ({ANN_NUM_CLUSTERS} clusters)...")
+                
+            logger.info("Training ANN index with %d embeddings (%d clusters, %d candidates)", 
+                       len(embeddings), ANN_NUM_CLUSTERS, ANN_CLUSTER_CANDIDATES)
+            self.ann_index.fit(embeddings)
+            
+            ann_time = time.time() - ann_start
+            final_message = f"Search index complete! ({ann_time:.1f}s)"
+            
+            if tui_progress:
+                try:
+                    tui_progress.update_progress(100, final_message, "Complete")
+                except:
+                    pass
+            elif console_fallback:
+                print(f"  {final_message}")
+                
+            logger.info("ANN index rebuilt in %.3fs", ann_time)
+            
+        except Exception as e:
+            error_message = f"Search indexing failed: {e}"
+            logger.error("Error rebuilding ANN index: %s", e)
+            if tui_progress:
+                try:
+                    tui_progress.update_progress(100, error_message, "Error")
+                except:
+                    pass
+            elif console_fallback:
+                print(f"  {error_message}")
+            
             self.ann_index = ANNSearchIndex()
     
     def _save_ann_index(self):
@@ -1788,9 +2325,9 @@ class FuzzyShell:
             hybrid = self._dynamic_hybrid_score(sem, bm25, candidate_commands[i], query)
             combined_scores.append(hybrid)
             
-            # Log top scores for debugging
-            if i < 5 or "git lfs ls-files" in candidate_commands[i] or "ollama list" in candidate_commands[i]:
-                logger.info("Score: '%s' → Sem:%.3f BM25:%.3f Hybrid:%.3f", 
+            # Log top scores for debugging (can be removed in production)
+            if i < 5:  # Only log top 5 for performance
+                logger.debug("Score: '%s' → Sem:%.3f BM25:%.3f Hybrid:%.3f", 
                            candidate_commands[i][:50], sem, bm25, hybrid)
         
         combined_scores = np.array(combined_scores)
@@ -1877,12 +2414,17 @@ class FuzzyShell:
         
         # Get embedding model information
         try:
-            if self._model and hasattr(self._model, 'get_model_info'):
-                info['embedding_model'] = self._model.get_model_info()
+            if self._model and hasattr(self._model, 'get_embedding_model_info'):
+                info['embedding_model'] = self._model.get_embedding_model_info()
             else:
+                # Fallback when model not initialized
+                current_model = get_active_model_key()
+                config = get_model_config(current_model)
                 info['embedding_model'] = {
                     'status': 'Not initialized',
-                    'model_name': 'Mitchins/multilingual-minilm-l12-h384-terminal-describer-embeddings-ONNX'
+                    'model_key': current_model,
+                    'model_name': config['repo'],
+                    'description': config['description']
                 }
         except Exception as e:
             info['embedding_model'] = {'error': str(e)}
@@ -1951,17 +2493,25 @@ class FuzzyShell:
         if 'error' in emb_model:
             print(f"  Error: {emb_model['error']}")
         else:
-            model_name = emb_model.get('model_name', 'Unknown')
-            # Shorten the model name for readability
-            if 'multilingual-minilm-l12-h384' in model_name:
-                short_name = "Mitchins/multilingual-minilm-l12-h384 (terminal-trained)"
+            # Use description if available, fallback to model name
+            if 'description' in emb_model:
+                print(f"  Model: {emb_model['description']}")
             else:
-                short_name = model_name
-            print(f"  Model: {short_name}")
-            print(f"  Status: {emb_model.get('model_status', 'Unknown')}")
+                model_name = emb_model.get('model_name', 'Unknown')
+                print(f"  Model: {model_name}")
+            
+            print(f"  Status: {emb_model.get('status', 'Unknown')}")
             print(f"  Dimensions: {emb_model.get('dimensions', 'Unknown')}")
-            if detailed and 'model_size_mb' in emb_model:
-                print(f"  Size: {emb_model['model_size_mb']}")
+            
+            if detailed:
+                if 'model_key' in emb_model:
+                    print(f"  Model Key: {emb_model['model_key']}")
+                if 'tokenizer_type' in emb_model:
+                    print(f"  Tokenizer: {emb_model['tokenizer_type']}")
+                if 'actual_size_mb' in emb_model:
+                    print(f"  Size: {emb_model['actual_size_mb']} MB")
+                elif 'model_size_mb' in emb_model:
+                    print(f"  Expected Size: {emb_model['model_size_mb']} MB")
         
         # Description model info
         print("\nDESCRIPTION MODEL:")
@@ -2095,7 +2645,8 @@ def main():
 
     parser = argparse.ArgumentParser(description="FuzzyShell: A semantic search for your command history.")
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
-    parser.add_argument('--ingest', action='store_true', help='Ingest commands from shell history.')
+    parser.add_argument('--ingest', action='store_true', help='Full re-ingestion from shell history (use for repairs/model changes).')
+    parser.add_argument('--rebuild-ann', action='store_true', help='Rebuild the ANN index for optimal search performance.')
     parser.add_argument('--scoring', action='store_true', help='Show semantic and BM25 scores for each result.')
     parser.add_argument('--status', action='store_true', help='Show system status and model information.')
     parser.add_argument('--info', action='store_true', help='Show detailed system information including model details.')
@@ -2119,6 +2670,34 @@ def main():
         sys.exit(0)
     
     fuzzyshell = FuzzyShell()
+    
+    # Perform ingestion on startup for interactive mode
+    if not any([args.status, args.info, args.ingest, args.rebuild_ann, args.clear_cache, args.open_hood]):
+        try:
+            indexed_count = fuzzyshell.get_indexed_count()
+            
+            if indexed_count == 0:
+                # Empty database - perform full initial ingestion
+                print("🎉 First time setup - ingesting command history...")
+                added_count = fuzzyshell.ingest_history()
+                if added_count > 0:
+                    print(f"✅ Ingested {added_count} commands from your shell history")
+                else:
+                    print("⚠️  No commands found in shell history")
+            else:
+                # Existing database - perform micro-ingest for new commands
+                from .micro_ingest import micro_ingest, suggest_ann_rebuild
+                new_commands, should_rebuild = micro_ingest(fuzzyshell)
+                if new_commands > 0:
+                    logger.info("Micro-ingest added %d new commands", new_commands)
+                
+                # Check if ANN rebuild is suggested
+                if should_rebuild:
+                    suggestion = suggest_ann_rebuild(fuzzyshell)
+                    if suggestion:
+                        print(suggestion)
+        except Exception as e:
+            logger.warning("Ingestion failed: %s", str(e))
 
     # Handle status and info commands
     if args.status:
@@ -2128,7 +2707,18 @@ def main():
         fuzzyshell.print_system_info(detailed=True)  
         sys.exit(0)
     elif args.ingest:
+        print("🔄 Starting full re-ingestion from shell history...")
+        print("⚠️  This will clear all caches and rebuild the database.")
         fuzzyshell.ingest_history()
+        print("✅ Ingestion complete!")
+        sys.exit(0)
+    elif args.rebuild_ann:
+        print("🔧 Rebuilding ANN index...")
+        fuzzyshell._rebuild_ann_index()
+        fuzzyshell.set_metadata('ann_command_count', str(fuzzyshell.get_indexed_count()))
+        fuzzyshell.set_metadata('poorly_clustered_commands', '0')
+        print("✅ ANN index rebuilt successfully!")
+        sys.exit(0)
     else:
         # Handle ANN disable flag
         if args.no_ann:

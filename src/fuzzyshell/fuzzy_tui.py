@@ -2,8 +2,65 @@ import time
 import urwid
 import threading
 import logging
+import asyncio
 
 logger = logging.getLogger('FuzzyShell.TUI')
+
+# Import version at module level to avoid circular imports
+try:
+    from fuzzyshell import __version__
+except ImportError:
+    # Fallback for development/circular import issues
+    __version__ = "0.1.0"
+
+
+class HelpDialog(urwid.WidgetWrap):
+    """Help dialog showing keyboard shortcuts and about info"""
+    
+    def __init__(self):
+        help_text = [
+            ('bold', 'FuzzyShell'), ' - Semantic Command Search\n',
+            ('dark gray', f'Version {__version__}\n\n'),
+            
+            ('bold', 'Keyboard Shortcuts:\n'),
+            ('bold', '  ?        '), 'Show this help\n',
+            ('bold', '  ESC      '), 'Exit / Close dialog\n',
+            ('bold', '  Enter    '), 'Select command\n',
+            ('bold', '  ↑↓       '), 'Navigate results\n',
+            ('bold', '  Ctrl+S   '), 'Toggle score display\n',
+            ('bold', '  Ctrl+R   '), 'Refresh search\n',
+            ('bold', '  Ctrl+F   '), 'Shell: Open FuzzyShell\n\n',
+            
+            ('bold', 'Search Features:\n'),
+            '  • Semantic search finds commands by meaning\n',
+            '  • BM25 keyword search for exact matches\n', 
+            '  • Automatic command description generation\n',
+            '  • Real-time incremental search\n\n',
+            
+            ('bold', 'Tips:\n'),
+            '  • Search naturally: "list files" finds ls commands\n',
+            '  • Use score display to understand matches\n',
+            '  • Commands are auto-captured from your shell\n\n',
+            
+            ('dark gray', 'Press ESC to close this help')
+        ]
+        
+        content = urwid.Text(help_text)
+        padded = urwid.Padding(content, left=2, right=2)
+        filled = urwid.Filler(padded, valign='top', top=1)
+        
+        # Create a box with border
+        box = urwid.LineBox(filled, title='Help')
+        
+        # Make it an overlay that can be closed
+        self.attr_map = urwid.AttrMap(box, 'help_dialog')
+        super().__init__(self.attr_map)
+    
+    def keypress(self, size, key):
+        if key == 'esc':
+            return 'close_help'
+        return super().keypress(size, key)
+
 
 class WatermarkEdit(urwid.Edit):
     """Custom Edit widget with watermark text when empty."""
@@ -121,14 +178,11 @@ class StatusFooter(urwid.WidgetWrap):
         left_text = [('bold', ('dark cyan', f"FuzzyShell v{__version__}"))]
         if self.item_count > 0:
             left_text.append(('dark gray', f" • {self.item_count:,} items"))
-            if self.embedding_model != "unknown":
-                model_short = self.embedding_model.replace("minilm-l6-v2-terminal-describer", "Terminal-MiniLM")
-                model_short = model_short.replace("all-MiniLM-L6-v2", "MiniLM-L6")
-                left_text.append(('dark blue', f" ({model_short})"))
         if self.search_time > 0:
             left_text.append(('dark green', f" • {self.search_time*1000:.0f}ms"))
 
         right_text = [
+            ('bold', "?"), ('dark gray', " help "),
             ('bold', "ESC"), ('dark gray', " quit "),
             ('bold', "↑↓"), ('dark gray', " navigate "),
             ('bold', "ENTER"), ('dark gray', " select "),
@@ -788,6 +842,173 @@ class ResultRenderer:
             logger.error(f"Error setting initial focus: {e}")
 
 
+class IngestionProgressTUI:
+    """TUI for showing ingestion progress with clean, professional interface"""
+    
+    def __init__(self):
+        self.loop = None
+        self.progress_bar = None
+        self.status_text = None
+        self.stats_text = None
+        self.current_command_text = None
+        self.phase_text = None
+        self.running = False
+        
+        # Progress tracking
+        self.total_commands = 0
+        self.processed_commands = 0
+        self.current_phase = "Initializing..."
+        self.current_command = ""
+        self.start_time = None
+        
+    def setup_ui(self):
+        """Create the TUI layout"""
+        # Header
+        header = urwid.Text([
+            ('bold', 'FuzzyShell'), ' - Ingesting Command History\n'
+        ], align='center')
+        
+        # Phase indicator
+        self.phase_text = urwid.Text("Phase: Initializing...", align='center')
+        
+        # Progress bar
+        self.progress_bar = urwid.ProgressBar('pg normal', 'pg complete', current=0, done=100)
+        
+        # Status text
+        self.status_text = urwid.Text("Preparing to ingest commands...", align='center')
+        
+        # Current command being processed
+        self.current_command_text = urwid.Text("", align='center')
+        
+        # Statistics
+        self.stats_text = urwid.Text("", align='center')
+        
+        # Instructions
+        footer = urwid.Text("Press ESC to cancel (will exit gracefully)", align='center')
+        
+        # Layout
+        pile = urwid.Pile([
+            ('pack', urwid.Divider()),
+            ('pack', header),
+            ('pack', urwid.Divider()),
+            ('pack', self.phase_text),
+            ('pack', urwid.Divider()),
+            ('pack', urwid.Text("Progress:", align='center')),
+            ('pack', self.progress_bar),
+            ('pack', urwid.Divider()),
+            ('pack', self.status_text),
+            ('pack', urwid.Divider()),
+            ('pack', self.current_command_text),
+            ('pack', urwid.Divider()),
+            ('pack', self.stats_text),
+            ('pack', urwid.Divider()),
+            ('pack', urwid.Divider()),
+            ('pack', footer),
+        ])
+        
+        # Add padding
+        padded = urwid.Padding(pile, align='center', width=('relative', 80))
+        filled = urwid.Filler(padded, valign='middle')
+        
+        return filled
+        
+    def start(self):
+        """Start the TUI"""
+        self.running = True
+        self.start_time = time.time()
+        
+        # Setup UI
+        main_widget = self.setup_ui()
+        
+        # Color palette
+        palette = [
+            ('pg normal', 'white', 'dark blue'),
+            ('pg complete', 'white', 'dark green'),
+            ('bold', 'bold', ''),
+        ]
+        
+        # Create main loop
+        self.loop = urwid.MainLoop(
+            main_widget,
+            palette=palette,
+            handle_mouse=False,
+            unhandled_input=self._handle_input
+        )
+        
+        return self.loop
+        
+    def _handle_input(self, key):
+        """Handle keyboard input"""
+        if key == 'esc':
+            self.running = False
+            raise urwid.ExitMainLoop()
+            
+    def update_progress(self, progress, message, phase=None, current_command=None):
+        """Update the progress display"""
+        if not self.loop:
+            return
+            
+        try:
+            # Update progress bar
+            if self.progress_bar:
+                self.progress_bar.set_completion(min(100, max(0, progress)))
+            
+            # Update status message
+            if self.status_text:
+                self.status_text.set_text(message)
+            
+            # Update phase if provided
+            if phase and self.phase_text:
+                self.current_phase = phase
+                self.phase_text.set_text(f"Phase: {phase}")
+            
+            # Update current command if provided
+            if current_command and self.current_command_text:
+                self.current_command = current_command
+                # Truncate long commands
+                display_cmd = current_command
+                if len(display_cmd) > 60:
+                    display_cmd = display_cmd[:57] + "..."
+                self.current_command_text.set_text(f"Processing: {display_cmd}")
+            
+            # Update statistics
+            if self.stats_text and self.start_time:
+                elapsed = time.time() - self.start_time
+                if self.processed_commands > 0:
+                    rate = self.processed_commands / elapsed
+                    eta = (self.total_commands - self.processed_commands) / rate if rate > 0 else 0
+                    self.stats_text.set_text(
+                        f"Processed: {self.processed_commands}/{self.total_commands} commands  "
+                        f"Rate: {rate:.1f}/s  ETA: {eta:.1f}s"
+                    )
+                else:
+                    self.stats_text.set_text(f"Elapsed: {elapsed:.1f}s")
+            
+            # Refresh the display
+            if hasattr(self.loop, 'draw_screen'):
+                self.loop.draw_screen()
+                
+        except Exception as e:
+            logger.error(f"Error updating progress display: {e}")
+    
+    def set_total_commands(self, total):
+        """Set the total number of commands to process"""
+        self.total_commands = total
+        
+    def increment_processed(self):
+        """Increment the count of processed commands"""
+        self.processed_commands += 1
+        
+    def finish(self, message="Ingestion complete!"):
+        """Finish the progress display"""
+        if self.loop:
+            self.update_progress(100, message, "Complete")
+            # Give user a moment to see completion
+            time.sleep(1.5)
+            self.running = False
+            raise urwid.ExitMainLoop()
+
+
 class FuzzyShellApp:
     def __init__(self, search_callback, fuzzyshell_instance=None):
         self.search_callback = search_callback
@@ -1133,6 +1354,14 @@ class FuzzyShellApp:
         # DEBUG: Track ALL keys that reach unhandled_input
         logger.info(f"🔑 UNHANDLED_INPUT received key: '{key}' (type: {type(key)})")
         
+        # Handle help dialog close first
+        if hasattr(self, 'help_overlay') and self.loop.widget == self.help_overlay:
+            if key == 'esc' or key == 'close_help':
+                self._close_help_dialog()
+                return
+            # Let help dialog handle its own keys
+            return
+        
         # Special debug mode - press F1 to enable key logging
         if key == 'f1':
             logger.info("Debug mode: Press any key to see its representation, ESC to continue")
@@ -1167,6 +1396,11 @@ class FuzzyShellApp:
 
         # Tab key functionality removed - search mode is always hybrid
 
+        elif key == '?':
+            # Show help dialog
+            self._show_help_dialog()
+            return
+            
         elif key in ('ctrl s', '\x13', 'ctrl S', '\x1f', 's', 'S'):  # Multiple ways to toggle scores
             # Toggle score display
             logger.debug(f"unhandled_input: Got score toggle key '{key}', toggling scores from {self.show_scores}")
@@ -1213,6 +1447,24 @@ class FuzzyShellApp:
         except Exception as e:
             logger.debug(f"Error focusing input: {e}")
     
+    def _show_help_dialog(self):
+        """Show the help dialog as an overlay."""
+        help_dialog = HelpDialog()
+        overlay = urwid.Overlay(
+            help_dialog,
+            self.main_layout,
+            align='center',
+            width=('relative', 70),
+            valign='middle',
+            height=('relative', 80)
+        )
+        self.help_overlay = overlay
+        self.loop.widget = overlay
+    
+    def _close_help_dialog(self):
+        """Close the help dialog and return to main view."""
+        self.loop.widget = self.main_layout
+    
     def _on_focus_changed(self):
         """Handle focus changes in the results list using urwid's observer pattern."""
         try:
@@ -1257,6 +1509,7 @@ class FuzzyShellApp:
             ('header', 'light cyan', 'default'),
             ('footer', 'dark gray', 'default'),
             ('reversed', 'default,standout', 'default'),
+            ('help_dialog', 'white', 'dark blue'),
             
             
             # Input area - minimal styling

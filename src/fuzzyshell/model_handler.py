@@ -9,20 +9,39 @@ from pathlib import Path
 import logging
 from typing import Optional, List
 
+from .model_configs import (
+    get_active_model_key, get_model_config, get_required_files, 
+    TOKENIZER_FILES, validate_model_config
+)
+from .tokenizer_strategies import get_tokenizer_strategy
+
 logger = logging.getLogger('FuzzyShell.ModelHandler')
 
-# Model dimensions
-MODEL_OUTPUT_DIM = 384  # Base model output dimension
+# Model dimensions (will be determined by active model config)
+MODEL_OUTPUT_DIM = 384  # Default, overridden by model config
 
 class ModelHandler:
     def __init__(self, model_dir: Optional[str] = None):
         init_start = time.time()
         logger.debug("[MODEL] Initializing ModelHandler")
         
+        # Get active model configuration
+        self.model_key = get_active_model_key()
+        self.model_config = get_model_config(self.model_key)
+        logger.debug(f"[MODEL] Using model: {self.model_key} ({self.model_config['description']})")
+        
+        # Set up paths based on configuration
         logger.debug("[MODEL] Setting up paths...")
         self.model_dir = model_dir or str(Path.home() / ".fuzzyshell" / "model")
-        self.model_path = os.path.join(self.model_dir, "model_quantized.onnx")
+        
+        # Model file path from config
+        model_filename = os.path.basename(self.model_config["files"]["model_path"])
+        self.model_path = os.path.join(self.model_dir, model_filename)
         self.tokenizer_path = os.path.join(self.model_dir, "tokenizer.json")
+        
+        # Store model dimensions for runtime use
+        global MODEL_OUTPUT_DIM
+        MODEL_OUTPUT_DIM = self.model_config["files"]["dimensions"]
         
         # Ensure model directory exists
         logger.debug(f"[MODEL] Using model directory: {self.model_dir}")
@@ -55,7 +74,14 @@ class ModelHandler:
         
         logger.debug("[MODEL] Loading tokenizer")
         tokenizer_start = time.time()
-        self.tokenizer = Tokenizer.from_file(self.tokenizer_path)
+        from transformers import AutoTokenizer
+        self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir)
+        
+        # Initialize tokenizer strategy based on model config
+        tokenizer_type = self.model_config["files"]["tokenizer_type"]
+        self.tokenizer_strategy = get_tokenizer_strategy(tokenizer_type)
+        logger.debug(f"[MODEL] Using tokenizer strategy: {tokenizer_type}")
+        
         tokenizer_time = time.time() - tokenizer_start
         logger.debug(f"[MODEL] Tokenizer loaded in {tokenizer_time:.3f}s")
         
@@ -91,20 +117,30 @@ class ModelHandler:
             return False
 
     def _ensure_model_files(self):
-        """Download model and tokenizer if they don't exist."""
-        # Use the improved multilingual terminal-trained model with better performance
-        base_url = "https://huggingface.co/Mitchins/multilingual-minilm-l12-h384-terminal-describer-embeddings-ONNX/resolve/main"
+        """Download model and tokenizer files based on active model configuration."""
+        repo = self.model_config["repo"]
+        base_url = f"https://huggingface.co/{repo}/resolve/main"
+        model_path_in_repo = self.model_config["files"]["model_path"]
+        tokenizer_type = self.model_config["files"]["tokenizer_type"]
         
+        logger.debug(f"[MODEL] Downloading from repository: {repo}")
+        logger.debug(f"[MODEL] Model path in repo: {model_path_in_repo}")
+        logger.debug(f"[MODEL] Tokenizer type: {tokenizer_type}")
+        
+        # Build download list based on configuration
         files_to_download = {
             'model': (
                 self.model_path,
-                f"{base_url}/model_quantized.onnx"
-            ),
-            'tokenizer': (
-                self.tokenizer_path,
-                f"{base_url}/tokenizer.json"
+                f"{base_url}/{model_path_in_repo}"
             )
         }
+        
+        # Add tokenizer files based on type
+        required_tokenizer_files = TOKENIZER_FILES[tokenizer_type]
+        for filename in required_tokenizer_files:
+            local_path = os.path.join(self.model_dir, filename)
+            download_url = f"{base_url}/{filename}"
+            files_to_download[filename] = (local_path, download_url)
         
         for name, (path, url) in files_to_download.items():
             if os.path.exists(path):
@@ -116,7 +152,7 @@ class ModelHandler:
                     raise RuntimeError(f"Failed to download {name}")
                 logger.info("Custom terminal-trained %s download complete", name)
 
-    def encode(self, texts: List[str], truncate_to: Optional[int] = MODEL_OUTPUT_DIM) -> np.ndarray:
+    def encode(self, texts: List[str], truncate_to: Optional[int] = None) -> np.ndarray:
         """
         Encode a list of texts to embeddings, returning mean-pooled embeddings with shape (batch_size, MODEL_OUTPUT_DIM).
         
@@ -127,37 +163,32 @@ class ModelHandler:
         Returns:
             np.ndarray: Array of embeddings with shape (len(texts), output_dim)
         """
-        # Tokenize the texts
-        encoded = self.tokenizer.encode_batch(texts)
+        # Use tokenizer strategy to prepare inputs based on model type
+        model_inputs = self.tokenizer_strategy.prepare_inputs(self.tokenizer, texts)
         
-        # Prepare input tensors
-        input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
-        attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
-        token_type_ids = np.zeros_like(input_ids)
+        # Run inference with dynamically prepared inputs
+        outputs = self.session.run(None, model_inputs)
         
-        # Run inference
-        outputs = self.session.run(
-            None,
-            {
-                'input_ids': input_ids,
-                'attention_mask': attention_mask,
-                'token_type_ids': token_type_ids
-            }
-        )
+        # Get embeddings and convert to numpy array
+        embeddings = np.asarray(outputs[0])
         
-        # Get token embeddings and convert to numpy array
-        token_embeddings = np.asarray(outputs[0])  # Shape: (batch_size, num_tokens, embedding_dim)
+        # Check if we have token embeddings (3D) or sentence embeddings (2D)
+        if embeddings.ndim == 3:
+            # Token embeddings: (batch_size, num_tokens, embedding_dim)
+            # Mean pool embeddings across tokens using attention mask
+            attention_mask = model_inputs['attention_mask'][:, :, np.newaxis]  # Add embedding dimension
+            masked_embeddings = embeddings * attention_mask  # Zero out padding tokens
+            summed = np.sum(masked_embeddings, axis=1)  # Sum across tokens
+            counts = np.sum(attention_mask, axis=1)  # Count real tokens
+            mean_pooled = summed / np.maximum(counts, 1)  # Divide by token count, avoid div by 0
+        elif embeddings.ndim == 2:
+            # Sentence embeddings: (batch_size, embedding_dim) - already pooled
+            mean_pooled = embeddings
+        else:
+            raise ValueError(f"Unexpected embedding shape: {embeddings.shape}. Expected 2D or 3D array.")
         
-        # Mean pool embeddings across tokens using attention mask
-        # attention_mask has 1s for real tokens and 0s for padding
-        attention_mask = attention_mask[:, :, np.newaxis]  # Add embedding dimension
-        masked_embeddings = token_embeddings * attention_mask  # Zero out padding tokens
-        summed = np.sum(masked_embeddings, axis=1)  # Sum across tokens
-        counts = np.sum(attention_mask, axis=1)  # Count real tokens
-        mean_pooled = summed / np.maximum(counts, 1)  # Divide by token count, avoid div by 0
-        
-        # Truncate to desired output dimension if specified
-        if truncate_to and truncate_to < mean_pooled.shape[1]:
+        # Use model's native dimensions by default, allow truncation if specified
+        if truncate_to is not None and truncate_to < mean_pooled.shape[1]:
             mean_pooled = mean_pooled[:, :truncate_to]
             
         return mean_pooled
@@ -207,10 +238,9 @@ class DescriptionHandler:
         self.decoder_session = None
         self.tokenizer = None
         
-        # CodeT5 has separate encoder and decoder models (using non-quantized versions)
+        # CodeT5 has separate encoder and decoder models (using quantized int8 versions)
         self.encoder_path = os.path.join(self.model_dir, "encoder_model.onnx")
         self.decoder_path = os.path.join(self.model_dir, "decoder_model.onnx")
-        self.decoder_with_past_path = os.path.join(self.model_dir, "decoder_with_past_model.onnx")
         
         # CodeT5 uses RoBERTa tokenizer files
         self.vocab_path = os.path.join(self.model_dir, "vocab.json")
@@ -242,8 +272,6 @@ class DescriptionHandler:
             self.encoder_session = ort.InferenceSession(self.encoder_path, options)
             logger.debug("Loading custom CodeT5-small decoder ONNX model") 
             self.decoder_session = ort.InferenceSession(self.decoder_path, options)
-            logger.debug("Loading custom CodeT5-small decoder with past ONNX model")
-            self.decoder_with_past_session = ort.InferenceSession(self.decoder_with_past_path, options)
             
             # Initialize RoBERTa tokenizer for CodeT5 (uses RoBERTa tokenizer)
             logger.debug("Loading custom CodeT5-small tokenizer")
@@ -299,21 +327,17 @@ class DescriptionHandler:
 
     def _ensure_model_files(self):
         """Download custom CodeT5-small encoder, decoder models and tokenizer files if they don't exist."""
-        # Use custom terminal-trained CodeT5 model - non-quantized versions
+        # Use custom terminal-trained CodeT5 model - quantized versions (int8) for encoder/decoder
         base_url = "https://huggingface.co/Mitchins/codet5-small-terminal-describer-ONNX/resolve/main"
         
         files_to_download = {
             'encoder': (
                 self.encoder_path,
-                f"{base_url}/encoder_model.onnx"
+                f"{base_url}/int8/encoder_model.onnx"
             ),
             'decoder': (
                 self.decoder_path,
-                f"{base_url}/decoder_model.onnx"
-            ),
-            'decoder_with_past': (
-                self.decoder_with_past_path,
-                f"{base_url}/decoder_with_past_model.onnx"
+                f"{base_url}/int8/decoder_model.onnx"
             ),
             'vocab': (
                 self.vocab_path,
@@ -360,7 +384,7 @@ class DescriptionHandler:
             return self._generate_with_rules(command)
     
     def _generate_with_t5(self, command: str, max_length: int) -> str:
-        """Generate description using T5 model with proper decoder with past."""
+        """Generate description using simplified T5 model (encoder + decoder only)."""
         try:
             # Add the required prefix for CodeT5
             input_text = f'describe: {command}'
@@ -376,60 +400,27 @@ class DescriptionHandler:
 
             # 2. Initialize decoder input with pad_token_id
             decoder_input_ids = np.array([[self.tokenizer.pad_token_id]], dtype=np.int64)
-
             generated_tokens = []
-            past_decoder_key_values = None
-            past_encoder_key_values = None
 
+            # Simple generation without past key-value caching
             for _ in range(max_length):
-                if past_decoder_key_values is None:
-                    # First step: use decoder_session
-                    decoder_outputs = self.decoder_session.run(None, {
-                        "input_ids": decoder_input_ids,
-                        "encoder_hidden_states": encoder_hidden_states,
-                        "encoder_attention_mask": attention_mask
-                    })
-                    logits = decoder_outputs[0]
-                    
-                    # Collect all present key-value pairs from the first decoder output
-                    past_decoder_key_values = []
-                    past_encoder_key_values = []
-                    for i in range(1, len(decoder_outputs), 4):
-                        past_decoder_key_values.append(decoder_outputs[i])   # present.X.decoder.key
-                        past_decoder_key_values.append(decoder_outputs[i+1]) # present.X.decoder.value
-                        past_encoder_key_values.append(decoder_outputs[i+2]) # present.X.encoder.key
-                        past_encoder_key_values.append(decoder_outputs[i+3]) # present.X.encoder.value
+                # Use decoder_session for each token (no caching optimization)
+                decoder_outputs = self.decoder_session.run(None, {
+                    "input_ids": decoder_input_ids,
+                    "encoder_hidden_states": encoder_hidden_states,
+                    "encoder_attention_mask": attention_mask
+                })
+                logits = decoder_outputs[0]
 
-                else:
-                    # Subsequent steps: use decoder_with_past_session
-                    decoder_inputs = {
-                        "input_ids": decoder_input_ids[:, -1:], # Only pass the last generated token
-                        "encoder_attention_mask": attention_mask # Encoder attention mask is constant
-                    }
-                    
-                    # Add past_key_values to decoder_inputs (assuming 6 layers for CodeT5-small)
-                    for i in range(6):
-                        decoder_inputs[f"past_key_values.{i}.decoder.key"] = past_decoder_key_values[i*2]
-                        decoder_inputs[f"past_key_values.{i}.decoder.value"] = past_decoder_key_values[i*2+1]
-                        decoder_inputs[f"past_key_values.{i}.encoder.key"] = past_encoder_key_values[i*2]
-                        decoder_inputs[f"past_key_values.{i}.encoder.value"] = past_encoder_key_values[i*2+1]
-
-                    decoder_outputs = self.decoder_with_past_session.run(None, decoder_inputs)
-                    logits = decoder_outputs[0]
-                    
-                    # Update only the decoder key-value pairs from the output of decoder_with_past_session
-                    new_past_decoder_key_values = []
-                    for i in range(1, len(decoder_outputs), 2): # Iterate in groups of 2 for decoder key/value
-                        new_past_decoder_key_values.append(decoder_outputs[i])   # present.X.decoder.key
-                        new_past_decoder_key_values.append(decoder_outputs[i+1]) # present.X.decoder.value
-                    past_decoder_key_values = new_past_decoder_key_values
-
+                # Get next token
                 next_token_logits = logits[:, -1, :]
                 next_token = np.argmax(next_token_logits, axis=-1)
 
+                # Check for end of sequence
                 if next_token.item() == self.tokenizer.eos_token_id:
                     break
 
+                # Add token to sequence
                 generated_tokens.append(next_token.item())
                 decoder_input_ids = np.concatenate([decoder_input_ids, next_token.reshape(1, 1)], axis=-1)
 
@@ -577,7 +568,6 @@ class DescriptionHandler:
             desc_info.update({
                 'encoder_path': self.encoder_path,
                 'decoder_path': self.decoder_path,
-                'decoder_with_past_path': self.decoder_with_past_path,
                 'tokenizer_type': 'RoBERTa tokenizer',
             })
             
@@ -587,7 +577,6 @@ class DescriptionHandler:
                 for name, path in [
                     ('Encoder', self.encoder_path),
                     ('Decoder', self.decoder_path), 
-                    ('Decoder w/ Past', self.decoder_with_past_path),
                     ('Vocab', self.vocab_path),
                     ('Merges', self.merges_path),
                 ]:
@@ -600,3 +589,42 @@ class DescriptionHandler:
                 desc_info['file_check_error'] = str(e)
         
         return desc_info
+    
+    def get_embedding_model_info(self) -> dict:
+        """Get comprehensive embedding model information."""
+        model_info = {
+            'model_key': self.model_key,
+            'model_name': self.model_config['repo'],
+            'description': self.model_config['description'],
+            'dimensions': self.model_config['files']['dimensions'],
+            'tokenizer_type': self.model_config['files']['tokenizer_type'],
+            'model_size_mb': self.model_config['files'].get('model_size_mb', 'Unknown'),
+            'model_path': self.model_path,
+        }
+        
+        # Add file existence checks
+        try:
+            if os.path.exists(self.model_path):
+                actual_size = os.path.getsize(self.model_path) / (1024 * 1024)
+                model_info['actual_size_mb'] = f"{actual_size:.1f}"
+                model_info['status'] = 'Available'
+            else:
+                model_info['status'] = 'Not Downloaded'
+                
+            # Check tokenizer files
+            tokenizer_files = TOKENIZER_FILES[self.model_config['files']['tokenizer_type']]
+            missing_files = []
+            for filename in tokenizer_files:
+                file_path = os.path.join(self.model_dir, filename)
+                if not os.path.exists(file_path):
+                    missing_files.append(filename)
+            
+            if missing_files:
+                model_info['missing_files'] = missing_files
+                if model_info['status'] == 'Available':
+                    model_info['status'] = 'Incomplete'
+                    
+        except Exception as e:
+            model_info['file_check_error'] = str(e)
+            
+        return model_info
