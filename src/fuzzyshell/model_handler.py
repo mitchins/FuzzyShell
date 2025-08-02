@@ -53,7 +53,7 @@ class ModelHandler:
         options_start = time.time()
         options = ort.SessionOptions()
         options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        options.intra_op_num_threads = 1  # Single thread per session for better parallelism
+        options.intra_op_num_threads = 0  # Use all available cores for batch processing
         options.inter_op_num_threads = 1
         options.enable_cpu_mem_arena = False  # Disable memory arena for smaller memory footprint
         options.enable_mem_pattern = False   # Disable memory pattern optimization for faster startup
