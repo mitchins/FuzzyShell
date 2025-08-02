@@ -28,7 +28,7 @@ file_handler.setFormatter(logging.Formatter(
 
 # Console handler for important messages only
 console_handler = logging.StreamHandler()
-console_handler.setLevel(logging.WARNING)
+console_handler.setLevel(logging.CRITICAL)
 console_handler.setFormatter(logging.Formatter('%(message)s'))
 
 # Configure root logger

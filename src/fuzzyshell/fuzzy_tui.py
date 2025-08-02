@@ -3,6 +3,7 @@ import urwid
 import threading
 import logging
 import asyncio
+import random
 
 logger = logging.getLogger('FuzzyShell.TUI')
 
@@ -861,6 +862,27 @@ class IngestionProgressTUI:
         self.current_command = ""
         self.start_time = None
         
+        # Witty remarks for loading screen
+        self.witty_remarks = [
+            "Solving the universe, one command at a time...",
+            "Chasing my own tail... but productively.",
+            "Reticulating splines... for maximum fuzziness.",
+            "Herding cats... also known as tokenizing commands.",
+            "Polishing the bits... they were looking a bit dull.",
+            "Teaching the model to fish for commands.",
+            "Warming up the neural nets... they get cranky when cold.",
+            "Finding the meaning of life in your shell history.",
+            "Don't worry, I'm a professional... at being fuzzy.",
+            "Making the command line feel... well, fuzzier.",
+            "Generating witty remarks... this is the best one.",
+            "Almost there... maybe.",
+            "Just a few more moments of suspense...",
+            "Are we there yet? No, but the journey is beautiful.",
+            "I'm not sleeping, I'm just processing... at the speed of thought.",
+        ]
+        self.last_remark_index = -1
+        self.last_remark_time = 0.0 # Initialize last_remark_time
+        
     def setup_ui(self):
         """Create the TUI layout"""
         # Header
@@ -953,9 +975,20 @@ class IngestionProgressTUI:
             if self.progress_bar:
                 self.progress_bar.set_completion(min(100, max(0, progress)))
             
-            # Update status message
+            # Update status message with a witty remark, ensuring it stays for at least 5 seconds
             if self.status_text:
-                self.status_text.set_text(message)
+                current_time = time.time()
+                if current_time - self.last_remark_time >= 5.0:
+                    # Pick a new, random remark that wasn't the last one
+                    remark_index = self.last_remark_index
+                    while remark_index == self.last_remark_index:
+                        remark_index = random.randint(0, len(self.witty_remarks) - 1)
+                    self.last_remark_index = remark_index
+                    self.last_remark_time = current_time
+                    
+                    remark = self.witty_remarks[remark_index]
+                    self.status_text.set_text(remark)
+                # Else, keep the current remark until 5 seconds have passed
             
             # Update phase if provided
             if phase and self.phase_text:
