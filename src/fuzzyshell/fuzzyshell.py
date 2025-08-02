@@ -1528,7 +1528,7 @@ class FuzzyShell:
             print("Generating embeddings for all commands...")
         
         # Generate embeddings in batches but store them in memory
-        BATCH_SIZE = 1  # Optimal batch size for best performance (256+ commands/sec)
+        BATCH_SIZE = 32 # Optimal batch size for best performance (256+ commands/sec)
         all_embeddings = []
         all_command_data = []
         
@@ -1568,23 +1568,47 @@ class FuzzyShell:
         # Single bulk insert for all commands
         c.executemany("INSERT OR IGNORE INTO commands (command, length) VALUES (?, ?)", all_command_data)
         
-        # Get all the command IDs at once
-        last_id = c.execute("SELECT MAX(id) FROM commands").fetchone()[0]
-        first_id = last_id - final_command_count + 1
+        # Get the IDs for all processed commands to ensure correctness
+        placeholders = ','.join('?' for _ in new_commands)
+        c.execute(f"SELECT id, command FROM commands WHERE command IN ({placeholders})", new_commands)
+        command_to_id = {cmd: cmd_id for cmd_id, cmd in c.fetchall()}
         
-        # Prepare all embedding data at once
+        # Prepare embedding and term frequency data in one pass
         embedding_data = []
-        for i, embedding in enumerate(all_embeddings):
-            command_id = first_id + i
+        term_freq_data = []
+        
+        # Note: all_embeddings is in the same order as new_commands
+        for i, command in enumerate(new_commands):
+            command_id = command_to_id.get(command)
+            if not command_id:
+                continue  # Skip if command wasn't inserted for some reason
+
+            # 1. Prepare embedding data
+            embedding = all_embeddings[i]
             if len(embedding) > MODEL_OUTPUT_DIM:
                 embedding = embedding[:MODEL_OUTPUT_DIM]
             quantized_embedding = self.quantize_embedding(embedding)
             embedding_data.append((command_id, quantized_embedding.tobytes()))
-        
-        # Single bulk insert for all embeddings
+
+            # 2. Prepare term frequency data for BM25
+            terms = self.tokenize(command)
+            term_counts = Counter(terms)
+            for term, freq in term_counts.items():
+                term_freq_data.append((term, command_id, freq))
+
+        if tui_progress:
+            try:
+                tui_progress.update_progress(85, "Saving embeddings and keyword index...", "Database Write")
+            except:
+                pass
+
+        # Bulk insert embeddings
         c.executemany("INSERT OR REPLACE INTO embeddings (rowid, embedding) VALUES (?, ?)", embedding_data)
         
-        total_processed = final_command_count
+        # Bulk insert term frequencies
+        c.executemany("INSERT OR REPLACE INTO term_frequencies (term, command_id, freq) VALUES (?, ?, ?)", term_freq_data)
+        
+        total_processed = len(command_to_id)
         
         if tui_progress:
             tui_progress.processed_commands = total_processed
