@@ -214,19 +214,28 @@ fi
 
 # ZSH integration
 if [ -n "$ZSH_VERSION" ]; then
-    # Ctrl+F handler for ZSH (similar to fzf integration)
+    # Ctrl+F handler for ZSH using pipe-based communication
     fuzzy_search_widget() {
-        local selected_cmd
         local current_buffer="$BUFFER"
         local current_cursor="$CURSOR"
+        local pipe_file="$HOME/.fuzzyshell/selection_$$_widget"
         
-        # Run fuzzy TUI - redirect through tty for proper interaction
-        selected_cmd=$("$FUZZYSHELL_CMD" < /dev/tty 2> /dev/tty)
+        # Run fuzzy with proper TTY access and result pipe
+        FUZZYSHELL_RESULT_FILE="$pipe_file" "$FUZZYSHELL_CMD" < /dev/tty
         local ret=$?
         
-        if [ $ret -eq 0 ] && [ -n "$selected_cmd" ]; then
-            BUFFER="$selected_cmd"
-            CURSOR=${#BUFFER}
+        # Check for selection via pipe
+        if [ -f "$pipe_file" ]; then
+            local selected_cmd=$(cat "$pipe_file")
+            rm -f "$pipe_file"
+            
+            if [ -n "$selected_cmd" ]; then
+                BUFFER="$selected_cmd"
+                CURSOR=${#BUFFER}
+            else
+                BUFFER="$current_buffer"
+                CURSOR=$current_cursor
+            fi
         else
             BUFFER="$current_buffer"
             CURSOR=$current_cursor
@@ -290,25 +299,35 @@ elif [ -n "$BASH_VERSION" ]; then
     fi
 fi
 
-# Main fuzzy function with command insertion
+# Main fuzzy function with pipe-based command insertion
 fuzzy() {
-    local selected_cmd
-    selected_cmd=$("$FUZZYSHELL_CMD" "$@")
+    local pipe_file="$HOME/.fuzzyshell/selection_$$"
     
-    # Check if a command was selected
-    if [ $? -eq 0 ] && [ -n "$selected_cmd" ] && [ "$selected_cmd" != "" ]; then
-        if [ -n "$ZSH_VERSION" ]; then
-            # ZSH: Insert into command line buffer
-            print -z "$selected_cmd"
-        elif [ -n "$BASH_VERSION" ]; then
-            # Bash: Add to history and display
-            history -s "$selected_cmd"
-            echo "Selected: $selected_cmd"
-        else
-            # Fallback: just echo the command
-            echo "$selected_cmd"
+    # Run fuzzy with result pipe
+    FUZZYSHELL_RESULT_FILE="$pipe_file" "$FUZZYSHELL_CMD" "$@"
+    local exit_code=$?
+    
+    # Check if a command was selected via pipe
+    if [ -f "$pipe_file" ]; then
+        local selected_cmd=$(cat "$pipe_file")
+        rm -f "$pipe_file"
+        
+        if [ -n "$selected_cmd" ]; then
+            if [ -n "$ZSH_VERSION" ]; then
+                # ZSH: Insert into command line buffer
+                print -z "$selected_cmd"
+            elif [ -n "$BASH_VERSION" ]; then
+                # Bash: Add to history and display
+                history -s "$selected_cmd"
+                echo "Selected: $selected_cmd"
+            else
+                # Fallback: just echo the command
+                echo "$selected_cmd"
+            fi
         fi
     fi
+    
+    return $exit_code
 }
 
 # Additional aliases

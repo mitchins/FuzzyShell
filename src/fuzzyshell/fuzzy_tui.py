@@ -4,6 +4,7 @@ import threading
 import logging
 import asyncio
 import random
+import os
 
 from .tui.widgets import (
     HelpDialog, WatermarkEdit, SearchModeIndicator, LoadingIndicator,
@@ -1196,6 +1197,20 @@ class FuzzyShellApp:
 
         try:
             self.loop.run()
+            
+            # Write selected command to pipe file if requested
+            if self._selected_command:
+                result_file = os.environ.get('FUZZYSHELL_RESULT_FILE')
+                if result_file:
+                    try:
+                        # Atomic write using temp file
+                        temp_file = result_file + '.tmp'
+                        with open(temp_file, 'w') as f:
+                            f.write(self._selected_command)
+                        os.rename(temp_file, result_file)
+                    except Exception as e:
+                        logger.error(f"Failed to write result to pipe: {e}")
+            
             # Return the selected command if any
             return self._selected_command
         except Exception as e:
