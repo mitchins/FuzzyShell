@@ -4,11 +4,14 @@ import os
 import time
 import threading
 import urwid
+import logging
 from typing import Callable
 
 from .screens.onboarding import OnboardingScreen, StartupManager, OnboardingStage, ONBOARDING_PALETTE
 from .breadcrumb_logger import screen_did_become_visible, screen_did_become_hidden
 from .logging_redirect import start_tui_redirect, stop_tui_redirect
+
+logger = logging.getLogger(__name__)
 
 
 def run_comprehensive_onboarding(main_tui_callback: Callable, no_random=False):
