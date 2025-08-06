@@ -206,8 +206,8 @@ export FUZZYSHELL_CMD="$FUZZYSHELL_HOME/venv/bin/fuzzy"
 
 # Ensure fuzzy command is available
 if [ ! -f "$FUZZYSHELL_CMD" ]; then
-    echo "⚠️  FuzzyShell not found at $FUZZYSHELL_CMD"
-    echo "   Run: curl -sSL https://raw.githubusercontent.com/mitchins/fuzzyshell/main/install_standalone.sh | bash"
+    echo -e "⚠️  FuzzyShell not found at $FUZZYSHELL_CMD"
+    echo -e "   Run: curl -sSL https://raw.githubusercontent.com/mitchins/fuzzyshell/main/install_standalone.sh | bash"
     return 1
 fi
 
@@ -240,7 +240,7 @@ if [ -n "$ZSH_VERSION" ]; then
     # Command capture hook
     fuzzyshell_preexec() {
         if [ -n "$1" ]; then
-            echo "$1" >> "$HOME/.fuzzyshell_recent_commands"
+            echo -e "$1" >> "$HOME/.fuzzyshell_recent_commands"
             # Keep only last 1000 commands
             if [ $(wc -l < "$HOME/.fuzzyshell_recent_commands" 2>/dev/null || echo 0) -gt 1000 ]; then
                 tail -n 1000 "$HOME/.fuzzyshell_recent_commands" > "$HOME/.fuzzyshell_recent_commands.tmp"
@@ -273,7 +273,7 @@ elif [ -n "$BASH_VERSION" ]; then
     # Command capture using DEBUG trap
     fuzzyshell_capture() {
         if [ -n "$BASH_COMMAND" ] && [[ ! "$BASH_COMMAND" =~ ^[[:space:]] ]]; then
-            echo "$BASH_COMMAND" >> "$HOME/.fuzzyshell_recent_commands"
+            echo -e "$BASH_COMMAND" >> "$HOME/.fuzzyshell_recent_commands"
             # Keep only last 1000 commands
             if [ $(wc -l < "$HOME/.fuzzyshell_recent_commands" 2>/dev/null || echo 0) -gt 1000 ]; then
                 tail -n 1000 "$HOME/.fuzzyshell_recent_commands" > "$HOME/.fuzzyshell_recent_commands.tmp"
@@ -296,7 +296,7 @@ alias fuzzy-update="curl -sSL https://raw.githubusercontent.com/mitchins/fuzzysh
 
 # Silent check on startup (only show if verbose mode)
 if [ -n "$FUZZYSHELL_VERBOSE" ]; then
-    echo "✓ FuzzyShell ready (Ctrl+F to search)"
+    echo -e "✓ FuzzyShell ready (Ctrl+F to search)"
 fi
 EOF
     
@@ -304,9 +304,9 @@ EOF
     chmod +x "$FUZZYSHELL_HOME/shell_integration.sh"
     
     # Add to shell config
-    echo "" >> "$SHELL_CONFIG"
-    echo "# FuzzyShell - Semantic command search (installed $(date +%Y-%m-%d))" >> "$SHELL_CONFIG"
-    echo "[ -f \"$FUZZYSHELL_HOME/shell_integration.sh\" ] && source \"$FUZZYSHELL_HOME/shell_integration.sh\"" >> "$SHELL_CONFIG"
+    echo -e "" >> "$SHELL_CONFIG"
+    echo -e "# FuzzyShell - Semantic command search (installed $(date +%Y-%m-%d))" >> "$SHELL_CONFIG"
+    echo -e "[ -f \"$FUZZYSHELL_HOME/shell_integration.sh\" ] && source \"$FUZZYSHELL_HOME/shell_integration.sh\"" >> "$SHELL_CONFIG"
     
     log_success "Added FuzzyShell to $SHELL_CONFIG"
 }
@@ -334,41 +334,41 @@ initial_setup() {
 # Print success message
 print_success() {
     echo
-    echo "════════════════════════════════════════════════════════════════"
+    echo -e "════════════════════════════════════════════════════════════════"
     echo
     log_success "FuzzyShell v1.0 installed successfully!"
     echo
-    echo "📍 Installation location: $FUZZYSHELL_HOME"
-    echo "📂 Data location: $DATA_DIR"
+    echo -e "📍 Installation location: $FUZZYSHELL_HOME"
+    echo -e "📂 Data location: $DATA_DIR"
     echo
-    echo "🚀 To get started:"
+    echo -e "🚀 To get started:"
     echo
-    echo "   1. Reload your shell configuration:"
-    echo "      ${GREEN}source $SHELL_CONFIG${NC}"
+    echo -e "   1. Reload your shell configuration:"
+    echo -e "      ${GREEN}source $SHELL_CONFIG${NC}"
     echo
-    echo "   2. Use Ctrl+F to search your command history!"
+    echo -e "   2. Use Ctrl+F to search your command history!"
     echo
-    echo "📝 Available commands:"
-    echo "   • ${BLUE}fuzzy${NC}          - Open search interface"
-    echo "   • ${BLUE}fuzzy-ingest${NC}   - Re-ingest command history"
-    echo "   • ${BLUE}fuzzy-rebuild${NC}  - Rebuild search index"
-    echo "   • ${BLUE}fuzzy-update${NC}   - Update FuzzyShell"
+    echo -e "📝 Available commands:"
+    echo -e "   • ${BLUE}fuzzy${NC}          - Open search interface"
+    echo -e "   • ${BLUE}fuzzy-ingest${NC}   - Re-ingest command history"
+    echo -e "   • ${BLUE}fuzzy-rebuild${NC}  - Rebuild search index"
+    echo -e "   • ${BLUE}fuzzy-update${NC}   - Update FuzzyShell"
     echo
-    echo "💡 Tips:"
-    echo "   • Ctrl+F works like Ctrl+R but with semantic search"
-    echo "   • Type naturally: 'list files' finds 'ls -la'"
-    echo "   • Commands are auto-captured for future searches"
+    echo -e "💡 Tips:"
+    echo -e "   • Ctrl+F works like Ctrl+R but with semantic search"
+    echo -e "   • Type naturally: 'list files' finds 'ls -la'"
+    echo -e "   • Commands are auto-captured for future searches"
     echo
-    echo "════════════════════════════════════════════════════════════════"
+    echo -e "════════════════════════════════════════════════════════════════"
     echo
 }
 
 # Main installation flow
 main() {
     echo
-    echo "═══════════════════════════════════════════════════════════════"
-    echo "                    FuzzyShell Installer v1.0                  "
-    echo "═══════════════════════════════════════════════════════════════"
+    echo -e "═══════════════════════════════════════════════════════════════"
+    echo -e "                    FuzzyShell Installer v1.0                  "
+    echo -e "═══════════════════════════════════════════════════════════════"
     echo
     
     # Run installation steps
