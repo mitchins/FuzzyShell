@@ -289,8 +289,28 @@ elif [ -n "$BASH_VERSION" ]; then
     fi
 fi
 
-# Convenience aliases
-alias fuzzy="$FUZZYSHELL_CMD"
+# Main fuzzy function with command insertion
+fuzzy() {
+    local selected_cmd
+    selected_cmd=$("$FUZZYSHELL_CMD" "$@")
+    
+    # Check if a command was selected
+    if [ $? -eq 0 ] && [ -n "$selected_cmd" ] && [ "$selected_cmd" != "" ]; then
+        if [ -n "$ZSH_VERSION" ]; then
+            # ZSH: Insert into command line buffer
+            print -z "$selected_cmd"
+        elif [ -n "$BASH_VERSION" ]; then
+            # Bash: Add to history and display
+            history -s "$selected_cmd"
+            echo "Selected: $selected_cmd"
+        else
+            # Fallback: just echo the command
+            echo "$selected_cmd"
+        fi
+    fi
+}
+
+# Additional aliases
 alias fuzzy-ingest="$FUZZYSHELL_CMD --ingest"
 alias fuzzy-rebuild="$FUZZYSHELL_CMD --rebuild-ann"
 alias fuzzy-update="curl -sSL https://raw.githubusercontent.com/mitchins/fuzzyshell/main/install_standalone.sh | bash"
