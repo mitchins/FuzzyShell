@@ -342,14 +342,7 @@ initial_setup() {
         return
     fi
     
-    log_info "Ingesting command history (this may take a moment)..."
-    
-    # Run ingestion
-    if "$VENV_DIR/bin/fuzzy" --ingest >/dev/null 2>&1; then
-        log_success "Command history ingested successfully"
-    else
-        log_warning "Initial ingestion failed - you can run 'fuzzy-ingest' manually later"
-    fi
+    log_info "Setup complete - beautiful TUI onboarding will run on first use"
 }
 
 # Print success message
@@ -375,10 +368,11 @@ print_success() {
     printf "   • \033[0;34mfuzzy-rebuild\033[0m  - Rebuild search index\n"
     printf "   • \033[0;34mfuzzy-update\033[0m   - Update FuzzyShell\n"
     echo
-    echo -e "💡 Tips:"
-    echo -e "   • Ctrl+F works like Ctrl+R but with semantic search"
-    echo -e "   • Type naturally: 'list files' finds 'ls -la'"
-    echo -e "   • Commands are auto-captured for future searches"
+    echo "💡 What happens next:"
+    echo "   • Run 'fuzzy' for beautiful TUI setup (ingests your history)"
+    echo "   • After setup: Ctrl+F works like Ctrl+R but with semantic search"  
+    echo "   • Type naturally: 'list files' finds 'ls -la'"
+    echo "   • Commands are auto-captured for future searches"
     echo
     echo -e "════════════════════════════════════════════════════════════════"
     echo
