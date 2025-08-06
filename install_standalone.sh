@@ -214,16 +214,17 @@ fi
 
 # ZSH integration
 if [ -n "$ZSH_VERSION" ]; then
-    # Ctrl+F handler for ZSH
+    # Ctrl+F handler for ZSH (similar to fzf integration)
     fuzzy_search_widget() {
         local selected_cmd
         local current_buffer="$BUFFER"
         local current_cursor="$CURSOR"
         
-        # Run fuzzy and capture output
-        selected_cmd=$("$FUZZYSHELL_CMD" 2>/dev/null)
+        # Run fuzzy TUI - redirect through tty for proper interaction
+        selected_cmd=$("$FUZZYSHELL_CMD" < /dev/tty 2> /dev/tty)
+        local ret=$?
         
-        if [ $? -eq 0 ] && [ -n "$selected_cmd" ]; then
+        if [ $ret -eq 0 ] && [ -n "$selected_cmd" ]; then
             BUFFER="$selected_cmd"
             CURSOR=${#BUFFER}
         else
