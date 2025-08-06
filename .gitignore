@@ -1,0 +1,48 @@
+**/*.pyc
+src/fuzzyshell.egg-info/dependency_links.txt
+src/fuzzyshell.egg-info/entry_points.txt
+src/fuzzyshell.egg-info/PKG-INFO
+src/fuzzyshell.egg-info/requires.txt
+src/fuzzyshell.egg-info/SOURCES.txt
+src/fuzzyshell.egg-info/top_level.txt
+.coverage*
+debug.log
+fuzzyshell.db
+venv/
+build/
+.pytest_cache/
+mascot_small.png
+.DS_Store
+CLAUDE.md
+AGENTS.md
+*.log
+__pycache__/
+*.egg-info/
+dist/
+fuzzyshell.db-shm
+fuzzyshell.db-wal
+demo.cast
+fuzzyshell_ann_index.pkl
+test_verification.db-shm
+test_verification.db-wal
+tmp*/**
+# Build artifacts
+*.egg-info/
+build/
+dist/
+*.tar.gz
+
+# Test artifacts
+htmlcov/
+.pytest_cache/
+.coverage*
+
+# Temporary files
+*.tmp
+temp_*
+test_*_temp
+
+# OS files
+.DS_Store
+Thumbs.db
+

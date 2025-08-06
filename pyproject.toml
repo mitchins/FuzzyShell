@@ -1,0 +1,52 @@
+[project]
+name = "fuzzyshell"
+version = "1.0.0"
+requires-python = ">=3.10"
+dependencies = [
+    "onnxruntime>=1.15.0",
+    "tokenizers>=0.15.0",
+    "transformers>=4.30.0",
+    "sentencepiece>=0.1.99",
+    "sqlite-vss>=0.1.0",
+    "numpy>=1.20.0",
+    "requests>=2.31.0",
+    "tqdm>=4.66.0",
+    "urwid>=2.1.2"
+]
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+fuzzy = "fuzzyshell.fuzzyshell:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-cov"
+]
+
+[tool.coverage.run]
+source = ["src/fuzzyshell"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 50
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = [".", "tests"]
+addopts = "--cov=src/fuzzyshell --cov-report=term-missing"
+filterwarnings = [
+    "ignore::DeprecationWarning:urwid.*",
+    "ignore:urwid.*is moved to.*:DeprecationWarning"
+]
