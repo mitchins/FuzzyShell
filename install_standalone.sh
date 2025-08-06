@@ -300,6 +300,9 @@ elif [ -n "$BASH_VERSION" ]; then
 fi
 
 # Main fuzzy function with pipe-based command insertion
+# Unalias any existing fuzzy alias first
+unalias fuzzy 2>/dev/null || true
+
 fuzzy() {
     local pipe_file="$HOME/.fuzzyshell/selection_$$"
     
