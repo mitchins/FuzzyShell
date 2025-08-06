@@ -116,7 +116,10 @@ def run_comprehensive_onboarding(main_tui_callback: Callable, no_random=False):
             advance_to_step(2)
             advance_to_step(3)
             indexed_count = fuzzyshell.get_indexed_count()
-            if indexed_count == 0:
+            embedding_count = fuzzyshell.command_dal.get_embedding_count()
+            
+            # Run ingestion if no embeddings OR embeddings don't match command count
+            if indexed_count == 0 or embedding_count != indexed_count:
                 added_count = fuzzyshell.ingest_history(use_tui=False, no_random=True)
                 if added_count and added_count > 0:
                     # Wait for database to be fully ready for searches
