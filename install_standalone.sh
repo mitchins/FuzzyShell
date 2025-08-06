@@ -99,8 +99,8 @@ find_python() {
     fi
     
     # Verify version is 3.9+
-    python_version=$($python_cmd -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-    if [[ $(echo "$python_version < 3.9" | bc -l) -eq 1 ]]; then
+    if ! $python_cmd -c 'import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)'; then
+        python_version=$($python_cmd -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
         log_error "Python $python_version is too old"
         log_info "FuzzyShell requires Python 3.9 or later"
         exit 1
