@@ -122,18 +122,30 @@ def run_comprehensive_onboarding(main_tui_callback: Callable, no_random=False):
                     # Wait for database to be fully ready for searches
                     advance_to_step(4, "Finalizing search index...")
                     
-                    # Ensure ANN index is properly saved and available
-                    max_attempts = 10
+                    # Ensure database WAL is fully committed and ANN index is saved
+                    max_attempts = 60  # Up to 30 seconds for large histories
                     for attempt in range(max_attempts):
                         try:
+                            # Force WAL checkpoint to ensure all writes are committed
+                            with fuzzyshell._database_provider.command_dal.connection() as conn:
+                                conn.execute("PRAGMA wal_checkpoint(FULL)")
+                            
+                            # Verify embeddings are actually accessible
+                            emb_count = fuzzyshell.command_dal.get_embedding_count()
+                            cmd_count = fuzzyshell.command_dal.get_command_count()
+                            
                             # Check if ANN manager is trained and cache is saved
-                            if (fuzzyshell.ann_manager and 
+                            if (emb_count > 0 and emb_count == cmd_count and 
+                                fuzzyshell.ann_manager and 
                                 fuzzyshell.ann_manager.is_trained() and
                                 fuzzyshell.ann_manager.save_to_cache()):
+                                logger.info(f"Database fully committed: {emb_count} embeddings ready")
                                 break
-                            time.sleep(0.3)
-                        except:
-                            time.sleep(0.3)
+                                
+                            time.sleep(0.5)
+                        except Exception as e:
+                            logger.debug(f"DB commit check attempt {attempt}: {e}")
+                            time.sleep(0.5)
                             
                     # Verify ANN index won't trigger a rebuild on first search
                     try:
