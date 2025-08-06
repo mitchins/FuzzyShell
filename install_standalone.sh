@@ -338,6 +338,45 @@ alias fuzzy-ingest="$FUZZYSHELL_CMD --ingest"
 alias fuzzy-rebuild="$FUZZYSHELL_CMD --rebuild-ann"
 alias fuzzy-update="curl -sSL https://raw.githubusercontent.com/mitchins/fuzzyshell/main/install_standalone.sh | bash"
 
+# Main fuzzy function with pipe-based command insertion
+# Unalias any existing fuzzy alias first
+unalias fuzzy 2>/dev/null || true
+
+fuzzy() {
+    local pipe_file="$HOME/.fuzzyshell/selection_$$"
+    
+    # Run fuzzy with result pipe
+    FUZZYSHELL_RESULT_FILE="$pipe_file" "$FUZZYSHELL_CMD" "$@"
+    local exit_code=$?
+    
+    # Check if a command was selected via pipe
+    if [ -f "$pipe_file" ]; then
+        local selected_cmd=$(cat "$pipe_file")
+        rm -f "$pipe_file"
+        
+        if [ -n "$selected_cmd" ]; then
+            if [ -n "$ZSH_VERSION" ]; then
+                # ZSH: Insert into command line buffer
+                print -z "$selected_cmd"
+            elif [ -n "$BASH_VERSION" ]; then
+                # Bash: Add to history and display
+                history -s "$selected_cmd"
+                echo "Selected: $selected_cmd"
+            else
+                # Fallback: just echo the command
+                echo "$selected_cmd"
+            fi
+        fi
+    fi
+    
+    return $exit_code
+}
+
+# Additional aliases
+alias fuzzy-ingest="$FUZZYSHELL_CMD --ingest"
+alias fuzzy-rebuild="$FUZZYSHELL_CMD --rebuild-ann"
+alias fuzzy-update="curl -sSL https://raw.githubusercontent.com/mitchins/fuzzyshell/main/install_standalone.sh | bash"
+
 # Silent check on startup (only show if verbose mode)
 if [ -n "$FUZZYSHELL_VERBOSE" ]; then
     echo "✓ FuzzyShell ready (Ctrl+F to search)"
