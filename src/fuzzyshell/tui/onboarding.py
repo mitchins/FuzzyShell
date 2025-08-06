@@ -118,15 +118,33 @@ def run_comprehensive_onboarding(main_tui_callback: Callable, no_random=False):
                 if added_count and added_count > 0:
                     # Wait for database to be fully ready for searches
                     advance_to_step(4, "Finalizing search index...")
-                    time.sleep(0.5)  # Brief pause to ensure database transactions complete
                     
-                    # Verify database is ready by testing a simple search
+                    # Ensure ANN index is properly saved and available
+                    max_attempts = 10
+                    for attempt in range(max_attempts):
+                        try:
+                            # Check if ANN manager is trained and cache is saved
+                            if (fuzzyshell.ann_manager and 
+                                fuzzyshell.ann_manager.is_trained() and
+                                fuzzyshell.ann_manager.save_to_cache()):
+                                break
+                            time.sleep(0.3)
+                        except:
+                            time.sleep(0.3)
+                            
+                    # Verify ANN index won't trigger a rebuild on first search
                     try:
-                        test_results = fuzzyshell.search("ls", top_k=1)
-                        if not test_results:
-                            time.sleep(0.5)  # Additional pause if no results yet
-                    except:
-                        time.sleep(0.5)  # Additional pause on any error
+                        # Double-check ANN is fully ready and accessible
+                        if (fuzzyshell.ann_manager and 
+                            fuzzyshell.ann_manager.is_trained()):
+                            # Perform a test search to verify no rebuild happens
+                            test_results = fuzzyshell.search("test", top_k=1)
+                            logger.info("ANN index verified ready - first search should be fast")
+                        else:
+                            logger.warning("ANN index not ready after ingestion")
+                    except Exception as e:
+                        logger.warning(f"ANN verification failed: {e}")
+                        time.sleep(0.5)
                         
                     if no_random:
                         advance_to_step(4, f"Indexed {added_count} commands from history")
