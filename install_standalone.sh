@@ -378,12 +378,13 @@ print_success() {
     echo -e "📍 Installation location: $FUZZYSHELL_HOME"
     echo -e "📂 Data location: $DATA_DIR"
     echo
-    echo -e "🚀 To get started:"
+    echo -e "🚨 IMPORTANT: Reload your shell first!"
     echo
-    echo "   1. Reload your shell configuration:"
-    printf "      \033[0;32msource $SHELL_CONFIG\033[0m\n"
+    printf "   Run this command NOW: \033[1;33msource $SHELL_CONFIG\033[0m\n"
     echo
-    echo -e "   2. Use Ctrl+F to search your command history!"
+    echo -e "🚀 Then you can:"
+    echo -e "   • Use Ctrl+F to search your command history"
+    echo -e "   • Or run 'fuzzy' to open search interface"
     echo
     echo "📝 Available commands:"
     printf "   • \033[0;34mfuzzy\033[0m          - Open search interface\n"

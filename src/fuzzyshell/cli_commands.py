@@ -247,6 +247,9 @@ def main():
     
     result = interactive_search(show_profiling=args.profile)
     if result:
-        # Print the selected command so it can be captured by the shell wrapper
-        print(result)
+        # Only print result if not using pipe-based IPC (legacy shell wrapper mode)
+        result_file = os.environ.get('FUZZYSHELL_RESULT_FILE')
+        if not result_file:
+            # Print the selected command so it can be captured by the shell wrapper
+            print(result)
     sys.exit(0)
