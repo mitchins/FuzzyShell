@@ -147,7 +147,15 @@ def run_comprehensive_onboarding(main_tui_callback: Callable, no_random=False):
             time.sleep(0.5)
             
             advance_to_step(6)
-            time.sleep(1.5)
+            
+            # Pre-warm main TUI components during final step to reduce transition lag  
+            try:
+                # Quick pre-initialization of search components (warms up caches/connections)
+                fuzzyshell.search("", top_k=1)  # Warm up search engine
+            except:
+                pass  # Ignore any pre-warming errors
+                
+            time.sleep(1.2)  # Reduced from 1.5s since pre-warming takes ~0.3s
             
             setup_complete = True
             time.sleep(0.5)
@@ -157,7 +165,8 @@ def run_comprehensive_onboarding(main_tui_callback: Callable, no_random=False):
             loop.set_alarm_in(0, lambda loop, user_data: startup_manager.set_error(setup_error))
             time.sleep(1.0)
         
-        loop.set_alarm_in(0.05, lambda loop, data: raise_exit_from_callback())
+        # Immediate transition to minimize CLI flash  
+        loop.set_alarm_in(0.01, lambda loop, data: raise_exit_from_callback())
     
     # Start setup work in background thread
     setup_thread = threading.Thread(target=setup_delegate, daemon=True)
@@ -190,8 +199,11 @@ def run_comprehensive_onboarding(main_tui_callback: Callable, no_random=False):
         print("Setup incomplete")
         return False
     screen_did_become_hidden("OnboardingScreen", "setup_complete")
+    
+    # Keep TUI mode active during transition to prevent CLI flash
     screen_did_become_visible("MainSearchTUI", {"transition_from": "onboarding"})
     
+    # Immediate transition - don't let TUI mode drop
     try:
         result = main_tui_callback(None)
         screen_did_become_hidden("MainSearchTUI", "normal_exit")
