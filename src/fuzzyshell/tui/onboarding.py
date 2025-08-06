@@ -116,6 +116,18 @@ def run_comprehensive_onboarding(main_tui_callback: Callable, no_random=False):
             if indexed_count == 0:
                 added_count = fuzzyshell.ingest_history(use_tui=False, no_random=True)
                 if added_count and added_count > 0:
+                    # Wait for database to be fully ready for searches
+                    advance_to_step(4, "Finalizing search index...")
+                    time.sleep(0.5)  # Brief pause to ensure database transactions complete
+                    
+                    # Verify database is ready by testing a simple search
+                    try:
+                        test_results = fuzzyshell.search("ls", top_k=1)
+                        if not test_results:
+                            time.sleep(0.5)  # Additional pause if no results yet
+                    except:
+                        time.sleep(0.5)  # Additional pause on any error
+                        
                     if no_random:
                         advance_to_step(4, f"Indexed {added_count} commands from history")
                     else:
